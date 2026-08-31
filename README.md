@@ -20,7 +20,7 @@ State that is persisted is typed: symbolic sparsity, numeric factorization, iter
 
 ## Status
 
-Rust kernel is in tree: sequential workspace, cached quasi-definite LDL, COSMO-style ADMM with sparse active-set polish, homogeneous DR with safeguarded Anderson, homogeneous sparse-KKT IPM (Andersen–Ye \((\tau,\kappa)\), cone-block \(H_s\), Nesterov–Todd on SOC/PSD), cone projections (zero, nonnegative, SOC, exponential, power, genpower, PSD), finance builders (mean-variance, CVaR, MAD, CDaR, EVaR), and a ctypes Python sequential API (`python/conix`).
+Rust kernel is in tree: sequential workspace, cached quasi-definite LDL with in-place numeric refactor, COSMO-style ADMM with sparse active-set polish, homogeneous DR with safeguarded Anderson, homogeneous sparse-KKT IPM (Andersen–Ye \((\tau,\kappa)\), cone-block \(H_s\), Nesterov–Todd on SOC/PSD), cone projections (zero, nonnegative, SOC, exponential, power, genpower, PSD), finance builders (mean-variance, CVaR, MAD, CDaR, EVaR), and a ctypes Python sequential API (`python/conix`).
 
 `EngineKind::Auto` on polyhedral problems uses ADMM when a numeric factor is still valid (R0) and the homogeneous NT-IPM when \(P\) or \(A\) must be numerically refactored (setup / R1). Non-polyhedral Auto (EVaR, exp, power, SOC) runs the barrier IPM first and keeps ADMM only if the independent checker prefers it. Every accepted `Solved` status is re-checked in original coordinates (\(r_p\), \(r_d\), \(r_K\), gap, complementarity). Finance slacks are reconstructed from \(x\) after R0/R1 data changes, not copied blindly. IPM infeasibility statuses are independently checked Farkas rays.
 
