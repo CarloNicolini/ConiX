@@ -684,3 +684,157 @@ pub extern "C" fn conix_version() -> *const c_char {
     static V: &[u8] = b"0.1.0\0";
     V.as_ptr() as *const c_char
 }
+
+/// Copy unscaled dual cone multiplier `z` (Clarabel / CVXPY dual `y`).
+#[no_mangle]
+pub unsafe extern "C" fn conix_z(p: *const Workspace, out: *mut c_double, m: usize) -> c_int {
+    if p.is_null() || out.is_null() {
+        set_err("null");
+        return -1;
+    }
+    let mut x = (*p).x.clone();
+    let mut s = (*p).s.clone();
+    let mut z = (*p).z.clone();
+    crate::scale::unscale_solution(&(*p).eq, &mut x, &mut s, &mut z);
+    let k = m.min(z.len());
+    ptr::copy_nonoverlapping(z.as_ptr(), out, k);
+    0
+}
+
+/// Copy unscaled slack `s`.
+#[no_mangle]
+pub unsafe extern "C" fn conix_s(p: *const Workspace, out: *mut c_double, m: usize) -> c_int {
+    if p.is_null() || out.is_null() {
+        set_err("null");
+        return -1;
+    }
+    let mut x = (*p).x.clone();
+    let mut s = (*p).s.clone();
+    let mut z = (*p).z.clone();
+    crate::scale::unscale_solution(&(*p).eq, &mut x, &mut s, &mut z);
+    let k = m.min(s.len());
+    ptr::copy_nonoverlapping(s.as_ptr(), out, k);
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn conix_update_p(
+    p: *mut Workspace,
+    n: usize,
+    p_col: *const usize,
+    p_row: *const usize,
+    p_x: *const c_double,
+    p_nnz: usize,
+) -> c_int {
+    match catch(|| {
+        let ws = ws_mut(p)?;
+        let mat = csc_from_raw(n, n, p_col, p_row, p_x, p_nnz, false)?;
+        ws.update_p(&mat)
+    }) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_err(&e);
+            -1
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn conix_update_a(
+    p: *mut Workspace,
+    m: usize,
+    n: usize,
+    a_col: *const usize,
+    a_row: *const usize,
+    a_x: *const c_double,
+    a_nnz: usize,
+) -> c_int {
+    match catch(|| {
+        let ws = ws_mut(p)?;
+        let mat = csc_from_raw(m, n, a_col, a_row, a_x, a_nnz, true)?;
+        ws.update_a(&mat)
+    }) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_err(&e);
+            -1
+        }
+    }
+}
+
+/// Warm-start from unscaled `(x, s, z)`. Null pointers skip that vector.
+#[no_mangle]
+pub unsafe extern "C" fn conix_warm_start(
+    p: *mut Workspace,
+    x: *const c_double,
+    s: *const c_double,
+    z: *const c_double,
+) -> c_int {
+    match catch(|| {
+        let ws = ws_mut(p)?;
+        let xv = if x.is_null() {
+            None
+        } else {
+            Some(slice::from_raw_parts(x, ws.x.len()))
+        };
+        let sv = if s.is_null() {
+            None
+        } else {
+            Some(slice::from_raw_parts(s, ws.s.len()))
+        };
+        let zv = if z.is_null() {
+            None
+        } else {
+            Some(slice::from_raw_parts(z, ws.z.len()))
+        };
+        ws.warm_start(xv, sv, zv);
+        Ok(())
+    }) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_err(&e);
+            -1
+        }
+    }
+}
+
+/// Configure common solver settings. Pass `-1` / `NaN` to leave a field unchanged.
+#[no_mangle]
+pub unsafe extern "C" fn conix_configure(
+    p: *mut Workspace,
+    max_iter: c_int,
+    eps_abs: c_double,
+    eps_rel: c_double,
+    verbose: c_int,
+    engine: c_int,
+    polish: c_int,
+) -> c_int {
+    match catch(|| {
+        let ws = ws_mut(p)?;
+        if max_iter >= 0 {
+            ws.settings.max_iter = max_iter as usize;
+        }
+        if eps_abs.is_finite() && eps_abs > 0.0 {
+            ws.settings.eps_abs = eps_abs;
+        }
+        if eps_rel.is_finite() && eps_rel > 0.0 {
+            ws.settings.eps_rel = eps_rel;
+        }
+        if verbose >= 0 {
+            ws.settings.verbose = verbose != 0;
+        }
+        if engine >= 0 {
+            ws.settings.engine = engine_from_i(engine);
+        }
+        if polish >= 0 {
+            ws.settings.polish = polish != 0;
+        }
+        Ok(())
+    }) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_err(&e);
+            -1
+        }
+    }
+}
