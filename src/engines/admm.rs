@@ -4,7 +4,7 @@
 //! evaluated on the same `w` that was just projected onto `K`. We copy that
 //! convention: after `w ← w`, `s = Π_K(w_s)`, termination uses `x = w_prev[1:n]`.
 
-use crate::algebra::{copy_from, inf_norm};
+use crate::algebra::{copy_from, inf_norm, CscExt};
 use crate::kkt::KktSystem;
 use crate::status::{Status, UpdateClass};
 use crate::workspace::Workspace;
@@ -250,7 +250,7 @@ fn sparse_polish(ws: &mut Workspace) {
         }
         let mut accepted = false;
         for _ in 0..12 {
-            let a_eq = ws.a.select_rows(&eq_rows);
+            let a_eq = ws.a.select_row_indices(&eq_rows);
             let mut b_eq = vec![0.0; eq_rows.len()];
             for (t, &row) in eq_rows.iter().enumerate() {
                 b_eq[t] = ws.b[row];
@@ -348,20 +348,20 @@ fn solve_eq_qp(
         let mut k = vec![0.0; dim * dim];
         let mut rhs = vec![0.0; dim];
         for j in 0..n {
-            for idx in p.col_ptr[j]..p.col_ptr[j + 1] {
-                let i = p.row_idx[idx];
-                k[i * dim + j] += p.x[idx];
+            for idx in p.colptr[j]..p.colptr[j + 1] {
+                let i = p.rowval[idx];
+                k[i * dim + j] += p.nzval[idx];
                 if i != j {
-                    k[j * dim + i] += p.x[idx];
+                    k[j * dim + i] += p.nzval[idx];
                 }
             }
             k[j * dim + j] += 1e-8;
             rhs[j] = -q[j];
         }
         for c in 0..n {
-            for idx in a_eq.col_ptr[c]..a_eq.col_ptr[c + 1] {
-                let r = a_eq.row_idx[idx];
-                let v = a_eq.x[idx];
+            for idx in a_eq.colptr[c]..a_eq.colptr[c + 1] {
+                let r = a_eq.rowval[idx];
+                let v = a_eq.nzval[idx];
                 k[(n + r) * dim + c] = v;
                 k[c * dim + (n + r)] = v;
             }

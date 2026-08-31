@@ -1,17 +1,16 @@
-//! Sparse cone-block KKT for the homogeneous IPM.
+//! Sparse cone-block KKT for the homogeneous IPM, factored with Clarabel QDLDL.
 //!
 //! \[
 //! K = \begin{bmatrix} P+\sigma I & A^\top \\ A & -H_s \end{bmatrix}
 //! \]
 //!
 //! \(H_s\) is block-diagonal across cones: a diagonal for Zero/NN, and a packed
-//! upper triangle for SOC / exp / power / genpower / PSD. AMD order and the
-//! symbolic factor stay valid across Newton steps and across sequential R1
-//! updates that keep the \((P,A)\) pattern.
+//! upper triangle for SOC / exp / power / genpower / PSD. Clarabel AMD order and
+//! the QDLDL symbolic factor stay valid across Newton steps and across sequential
+//! R1 updates that keep the \((P,A)\) pattern. The ConiX IPM algorithm that
+//! drives this linear system is unchanged.
 
-use crate::algebra::amd::order_upper;
-use crate::algebra::csc::{inv_permute, permute, CscMatrix};
-use crate::algebra::ldl::{LdlNumeric, LdlSymbolic};
+use crate::algebra::{qdldl_factor_qd, CscExt, CscMatrix, QDLDLFactorisation};
 use crate::cones::CompositeCone;
 
 const SIGMA: f64 = 1e-10;
@@ -34,10 +33,6 @@ pub struct IpmKkt {
     pub n: usize,
     pub m: usize,
     k_upper: CscMatrix,
-    perm: Vec<usize>,
-    k_perm: CscMatrix,
-    /// `k_perm.x[perm_map[p]] += k_upper.x[p]` after a value-only Hs update.
-    perm_map: Vec<usize>,
     #[allow(dead_code)]
     p_map: Vec<usize>,
     #[allow(dead_code)]
@@ -47,8 +42,7 @@ pub struct IpmKkt {
     hs_blocks: Vec<HsBlock>,
     packed_len: usize,
     packed: Vec<f64>,
-    sym: LdlSymbolic,
-    fac: Option<LdlNumeric>,
+    ldl: QDLDLFactorisation<f64>,
     work: Vec<f64>,
     work2: Vec<f64>,
     rhs: Vec<f64>,
@@ -58,7 +52,11 @@ pub struct IpmKkt {
 }
 
 impl IpmKkt {
-    pub fn analyze(p: &CscMatrix, a: &CscMatrix, cones: &CompositeCone) -> Result<Self, String> {
+    pub fn analyze(
+        p: &CscMatrix,
+        a: &CscMatrix,
+        cones: &CompositeCone,
+    ) -> Result<Self, String> {
         let n = p.n;
         let m = a.m;
         assert_eq!(p.m, n);
@@ -68,34 +66,26 @@ impl IpmKkt {
         let packed_len: usize = cones.cones.iter().map(|c| c.hs_packed_len()).sum();
         let packed = vec![0.0; packed_len];
         let (k_upper, p_map, a_map, diag_p, hs_blocks) = assemble(p, a, cones, &packed);
-        let perm = order_upper(&k_upper);
-        let k_perm = k_upper.permute_sym_upper(&perm);
-        let sym = LdlSymbolic::analyze(&k_perm).map_err(|e| e.msg.to_string())?;
+        let ldl = qdldl_factor_qd(&k_upper, n, 1e-12)?;
         let dim = n + m;
-        let mut sys = Self {
+        Ok(Self {
             n,
             m,
             k_upper,
-            perm,
-            k_perm,
-            perm_map: Vec::new(),
             p_map,
             a_map,
             diag_p,
             hs_blocks,
             packed_len,
             packed,
-            sym,
-            fac: None,
+            ldl,
             work: vec![0.0; dim],
             work2: vec![0.0; dim],
             rhs: vec![0.0; dim],
             sol: vec![0.0; dim],
             x2: vec![0.0; n],
             z2: vec![0.0; m],
-        };
-        sys.refactor()?;
-        Ok(sys)
+        })
     }
 
     pub fn packed_len(&self) -> usize {
@@ -107,21 +97,32 @@ impl IpmKkt {
     }
 
     fn refactor(&mut self) -> Result<(), String> {
-        if self.perm_map.is_empty() {
-            self.k_perm = self.k_upper.permute_sym_upper(&self.perm);
-            self.perm_map = build_perm_map(&self.k_upper, &self.perm, &self.k_perm);
-        } else {
-            scatter_perm(&self.k_upper, &self.perm_map, &mut self.k_perm);
+        // Clarabel-style static diagonal regularization before numeric refactor:
+        // shift diag by ±ε according to Dsigns so quasi-definite pivots stay
+        // away from zero; restore the unshifted K for residual matvecs / IR.
+        let ntot = self.n + self.m;
+        let mut diag_idx = Vec::with_capacity(ntot);
+        let mut diag_true = Vec::with_capacity(ntot);
+        let mut diag_shift = Vec::with_capacity(ntot);
+        for j in 0..ntot {
+            let p = find_diag(&self.k_upper, j);
+            let v = self.k_upper.nzval[p];
+            diag_idx.push(p);
+            diag_true.push(v);
+            let sign = if j < self.n { 1.0 } else { -1.0 };
+            diag_shift.push(v + sign * 1e-10_f64.max(1e-8 * v.abs()));
         }
-        if let Some(fac) = self.fac.as_mut() {
-            return fac
-                .refactor_qd(&self.k_perm, self.n, 1e-12)
-                .map_err(|e| e.msg.to_string());
+        self.ldl.update_values(&diag_idx, &diag_shift);
+        // Also sync any off-diagonal Hs / PA values already written into k_upper.
+        let all: Vec<usize> = (0..self.k_upper.nnz()).collect();
+        self.ldl.update_values(&all, &self.k_upper.nzval);
+        // Re-apply the shifted diagonal on top of the full sync.
+        self.ldl.update_values(&diag_idx, &diag_shift);
+        self.ldl.refactor().map_err(|e| e.to_string())?;
+        // Restore unshifted diagonal in the kept K (IR matvecs use this copy).
+        for (&p, &v) in diag_idx.iter().zip(diag_true.iter()) {
+            self.k_upper.nzval[p] = v;
         }
-        let fac = LdlNumeric::factor_regularized(&self.k_perm, &self.sym, self.n, 1e-12)
-            .or_else(|_| LdlNumeric::factor(&self.k_perm, &self.sym))
-            .map_err(|e| e.msg.to_string())?;
-        self.fac = Some(fac);
         Ok(())
     }
 
@@ -149,20 +150,17 @@ impl IpmKkt {
 
     pub fn solve(&mut self, rhs: &[f64], sol: &mut [f64], refinement: usize) {
         let ntot = self.n + self.m;
-        permute(&self.perm, rhs, &mut self.work);
-        self.fac.as_ref().unwrap().solve_in_place(&mut self.work);
-        inv_permute(&self.perm, &self.work, sol);
+        sol.copy_from_slice(rhs);
+        self.ldl.solve(sol);
         for _ in 0..refinement {
             self.work2.fill(0.0);
             self.k_upper.sym_mul_add(sol, &mut self.work2, 1.0);
             for i in 0..ntot {
-                self.work2[i] = rhs[i] - self.work2[i];
+                self.work[i] = rhs[i] - self.work2[i];
             }
-            permute(&self.perm, &self.work2, &mut self.work);
-            self.fac.as_ref().unwrap().solve_in_place(&mut self.work);
-            inv_permute(&self.perm, &self.work, &mut self.work2);
+            self.ldl.solve(&mut self.work);
             for i in 0..sol.len() {
-                sol[i] += self.work2[i];
+                sol[i] += self.work[i];
             }
         }
     }
@@ -180,7 +178,6 @@ impl IpmKkt {
         self.rhs[..n].copy_from_slice(rhs_x);
         self.rhs[n..n + m].copy_from_slice(rhs_z);
         self.sol.fill(0.0);
-        // Copy rhs into a local because `solve` borrows `self` mutably.
         for i in 0..n + m {
             self.work2[i] = self.rhs[i];
         }
@@ -191,20 +188,17 @@ impl IpmKkt {
 
     fn solve_into(&mut self, refinement: usize) {
         let ntot = self.n + self.m;
-        permute(&self.perm, &self.work2[..ntot], &mut self.work);
-        self.fac.as_ref().unwrap().solve_in_place(&mut self.work);
-        inv_permute(&self.perm, &self.work, &mut self.sol);
+        self.sol[..ntot].copy_from_slice(&self.work2[..ntot]);
+        self.ldl.solve(&mut self.sol[..ntot]);
         for _ in 0..refinement {
             self.rhs.fill(0.0);
             self.k_upper.sym_mul_add(&self.sol, &mut self.rhs, 1.0);
             for i in 0..ntot {
-                self.rhs[i] = self.work2[i] - self.rhs[i];
+                self.work[i] = self.work2[i] - self.rhs[i];
             }
-            permute(&self.perm, &self.rhs, &mut self.work);
-            self.fac.as_ref().unwrap().solve_in_place(&mut self.work);
-            inv_permute(&self.perm, &self.work, &mut self.rhs);
+            self.ldl.solve(&mut self.work[..ntot]);
             for i in 0..ntot {
-                self.sol[i] += self.rhs[i];
+                self.sol[i] += self.work[i];
             }
         }
     }
@@ -231,7 +225,13 @@ fn assemble(
     a: &CscMatrix,
     cones: &CompositeCone,
     packed: &[f64],
-) -> (CscMatrix, Vec<usize>, Vec<usize>, Vec<usize>, Vec<HsBlock>) {
+) -> (
+    CscMatrix,
+    Vec<usize>,
+    Vec<usize>,
+    Vec<usize>,
+    Vec<HsBlock>,
+) {
     let blocks = hs_block_placeholders(cones);
     assemble_with_blocks(p, a, &blocks, packed)
 }
@@ -264,7 +264,13 @@ fn assemble_with_blocks(
     a: &CscMatrix,
     blocks: &[HsBlock],
     packed: &[f64],
-) -> (CscMatrix, Vec<usize>, Vec<usize>, Vec<usize>, Vec<HsBlock>) {
+) -> (
+    CscMatrix,
+    Vec<usize>,
+    Vec<usize>,
+    Vec<usize>,
+    Vec<HsBlock>,
+) {
     let n = p.n;
     let m = a.m;
     let ntot = n + m;
@@ -273,9 +279,9 @@ fn assemble_with_blocks(
 
     let mut has_diag = vec![false; n];
     for j in 0..n {
-        for idx in pu.col_ptr[j]..pu.col_ptr[j + 1] {
-            let i = pu.row_idx[idx];
-            let mut v = pu.x[idx];
+        for idx in pu.colptr[j]..pu.colptr[j + 1] {
+            let i = pu.rowval[idx];
+            let mut v = pu.nzval[idx];
             if i == j {
                 v += SIGMA;
                 has_diag[j] = true;
@@ -290,9 +296,9 @@ fn assemble_with_blocks(
     }
 
     for c in 0..n {
-        for idx in a.col_ptr[c]..a.col_ptr[c + 1] {
-            let r = a.row_idx[idx];
-            trips.push((c, n + r, a.x[idx]));
+        for idx in a.colptr[c]..a.colptr[c + 1] {
+            let r = a.rowval[idx];
+            trips.push((c, n + r, a.nzval[idx]));
         }
     }
 
@@ -325,14 +331,14 @@ fn assemble_with_blocks(
 
     let mut p_map = Vec::with_capacity(pu.nnz());
     for j in 0..n {
-        for idx in pu.col_ptr[j]..pu.col_ptr[j + 1] {
-            p_map.push(find_entry(&k, pu.row_idx[idx], j));
+        for idx in pu.colptr[j]..pu.colptr[j + 1] {
+            p_map.push(find_entry(&k, pu.rowval[idx], j));
         }
     }
     let mut a_map = Vec::with_capacity(a.nnz());
     for c in 0..n {
-        for idx in a.col_ptr[c]..a.col_ptr[c + 1] {
-            let r = a.row_idx[idx];
+        for idx in a.colptr[c]..a.colptr[c + 1] {
+            let r = a.rowval[idx];
             a_map.push(find_entry(&k, c, n + r));
         }
     }
@@ -379,7 +385,7 @@ fn write_hs_into(k: &mut CscMatrix, blocks: &[HsBlock], packed: &[f64]) {
         match block {
             HsBlock::Diagonal { indices, .. } => {
                 for (k_i, &slot) in indices.iter().enumerate() {
-                    k.x[slot] = -packed[po + k_i] - HS_REG;
+                    k.nzval[slot] = -packed[po + k_i] - HS_REG;
                 }
                 po += indices.len();
             }
@@ -388,7 +394,7 @@ fn write_hs_into(k: &mut CscMatrix, blocks: &[HsBlock], packed: &[f64]) {
                 for j in 0..*dim {
                     for i in 0..=j {
                         let h = packed[po + t];
-                        k.x[indices[t]] = if i == j { -h - HS_REG } else { -h };
+                        k.nzval[indices[t]] = if i == j { -h - HS_REG } else { -h };
                         t += 1;
                     }
                 }
@@ -428,38 +434,16 @@ fn mul_hs_packed(blocks: &[HsBlock], packed: &[f64], x: &[f64], y: &mut [f64]) {
 }
 
 fn find_entry(k: &CscMatrix, row: usize, col: usize) -> usize {
-    for p in k.col_ptr[col]..k.col_ptr[col + 1] {
-        if k.row_idx[p] == row {
+    for p in k.colptr[col]..k.colptr[col + 1] {
+        if k.rowval[p] == row {
             return p;
         }
     }
     panic!("IPM KKT entry ({row},{col}) missing");
 }
 
-fn build_perm_map(upper: &CscMatrix, perm: &[usize], k_perm: &CscMatrix) -> Vec<usize> {
-    let n = upper.n;
-    let mut pinv = vec![0; n];
-    for (k, &i) in perm.iter().enumerate() {
-        pinv[i] = k;
-    }
-    let mut map = vec![0; upper.nnz()];
-    for j in 0..n {
-        for p in upper.col_ptr[j]..upper.col_ptr[j + 1] {
-            let i = upper.row_idx[p];
-            let pi = pinv[i];
-            let pj = pinv[j];
-            let (r, c) = if pi <= pj { (pi, pj) } else { (pj, pi) };
-            map[p] = find_entry(k_perm, r, c);
-        }
-    }
-    map
-}
-
-fn scatter_perm(upper: &CscMatrix, map: &[usize], k_perm: &mut CscMatrix) {
-    k_perm.x.fill(0.0);
-    for p in 0..upper.nnz() {
-        k_perm.x[map[p]] += upper.x[p];
-    }
+fn find_diag(k: &CscMatrix, col: usize) -> usize {
+    find_entry(k, col, col)
 }
 
 #[cfg(test)]
@@ -470,7 +454,7 @@ mod tests {
 
     #[test]
     fn exp_block_is_not_dense_m() {
-        let p = CscMatrix::zeros(1, 1);
+        let p = CscMatrix::zeros((1, 1));
         let a = CscMatrix::from_triplets(6, 1, &[(0, 0, 1.0), (3, 0, -1.0)]);
         let cones = CompositeCone::new(vec![Cone::Nonnegative { dim: 3 }, Cone::Exponential]);
         let k = IpmKkt::analyze(&p, &a, &cones).unwrap();
@@ -480,7 +464,6 @@ mod tests {
             "nnz={} should be cone-block, not dense Hs",
             k.k_nnz()
         );
-        // NN diag 3 + exp packed 6
         assert_eq!(k.packed_len(), 3 + 6);
     }
 

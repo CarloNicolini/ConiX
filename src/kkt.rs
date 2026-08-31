@@ -1,32 +1,35 @@
-//! Quasi-definite KKT assembly, symbolic analysis, and cached numeric factors.
+//! Quasi-definite KKT assembly with Clarabel QDLDL (AMD + LDLᵀ).
+//!
+//! K = [ P+σI , A' ]
+//!     [ A    , -R ]
+//! stored as the upper triangle. Factorisation, AMD ordering, and numeric
+//! refactorisation come from Clarabel's QDLDL — the same substrate as COSMO.rs.
+//! The ConiX ADMM / splitting iteration that *calls* this solver is unchanged.
 
-use crate::algebra::amd::order_upper;
-use crate::algebra::csc::{inv_permute, permute, CscMatrix};
-use crate::algebra::ldl::{LdlNumeric, LdlSymbolic};
+use crate::algebra::{qdldl_factor_qd, qdldl_sync_values, CscExt, CscMatrix, QDLDLFactorisation};
 
-/// K = [ P+σI , A' ]
-///     [ A    , -R ]
-/// stored as the upper triangle, then AMD-permuted.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct KktSystem {
     pub n: usize,
     pub m: usize,
     pub sigma: f64,
-    pub perm: Vec<usize>,
     pub k_upper: CscMatrix,
-    pub k_perm: CscMatrix,
     pub p_map: Vec<usize>,
     pub a_map: Vec<usize>,
     pub diag_map: Vec<usize>,
     pub rho_map: Vec<usize>,
-    pub sym: LdlSymbolic,
-    pub fac: Option<LdlNumeric>,
+    ldl: QDLDLFactorisation<f64>,
     work: Vec<f64>,
     work2: Vec<f64>,
 }
 
 impl KktSystem {
-    pub fn analyze(p: &CscMatrix, a: &CscMatrix, sigma: f64, rho: &[f64]) -> Result<Self, String> {
+    pub fn analyze(
+        p: &CscMatrix,
+        a: &CscMatrix,
+        sigma: f64,
+        rho: &[f64],
+    ) -> Result<Self, String> {
         let n = p.n;
         let m = a.m;
         assert_eq!(p.m, n);
@@ -35,59 +38,39 @@ impl KktSystem {
 
         let pu = p.upper_triangle();
         let (k_upper, p_map, a_map, diag_map, rho_map) = assemble_upper(&pu, a, sigma, rho);
-        let perm = order_upper(&k_upper);
-        let k_perm = k_upper.permute_sym_upper(&perm);
-        let sym = LdlSymbolic::analyze(&k_perm).map_err(|e| e.msg.to_string())?;
-        let mut sys = Self {
+        let ldl = qdldl_factor_qd(&k_upper, n, 1e-14)?;
+        Ok(Self {
             n,
             m,
             sigma,
-            perm,
             k_upper,
-            k_perm,
             p_map,
             a_map,
             diag_map,
             rho_map,
-            sym,
-            fac: None,
+            ldl,
             work: vec![0.0; n + m],
             work2: vec![0.0; n + m],
-        };
-        sys.refactor()?;
-        Ok(sys)
+        })
     }
 
     pub fn refactor(&mut self) -> Result<(), String> {
-        if let Some(fac) = self.fac.as_mut() {
-            return fac
-                .refactor_qd(&self.k_perm, self.n, 1e-14)
-                .map_err(|e| e.msg.to_string());
-        }
-        let fac = LdlNumeric::factor_regularized(&self.k_perm, &self.sym, self.n, 1e-14)
-            .or_else(|_| LdlNumeric::factor(&self.k_perm, &self.sym))
-            .map_err(|e| e.msg.to_string())?;
-        self.fac = Some(fac);
-        Ok(())
+        qdldl_sync_values(&mut self.ldl, &self.k_upper)
     }
 
     pub fn solve(&mut self, rhs: &[f64], sol: &mut [f64], refinement: usize) {
         let ntot = self.n + self.m;
         assert_eq!(rhs.len(), ntot);
-        permute(&self.perm, rhs, &mut self.work);
-        self.fac.as_ref().unwrap().solve_in_place(&mut self.work);
-        inv_permute(&self.perm, &self.work, sol);
+        sol.copy_from_slice(rhs);
+        self.ldl.solve(sol);
         for _ in 0..refinement {
-            // r = K sol - rhs, using unpermuted upper triangle
             kkt_mul(&self.k_upper, sol, &mut self.work2);
             for i in 0..ntot {
-                self.work2[i] = rhs[i] - self.work2[i];
+                self.work[i] = rhs[i] - self.work2[i];
             }
-            permute(&self.perm, &self.work2, &mut self.work);
-            self.fac.as_ref().unwrap().solve_in_place(&mut self.work);
-            inv_permute(&self.perm, &self.work, &mut self.work2);
+            self.ldl.solve(&mut self.work);
             for i in 0..ntot {
-                sol[i] += self.work2[i];
+                sol[i] += self.work[i];
             }
         }
     }
@@ -101,20 +84,33 @@ impl KktSystem {
     }
 
     /// Rewrite the quasi-definite diagonals in place: \(P+\sigma I\) and \(-1/\rho\).
-    /// Pattern, AMD order, and symbolic analysis stay valid (polyhedral NT-IPM).
+    /// Pattern and Clarabel AMD order stay valid (polyhedral NT-IPM).
     pub fn update_nt(&mut self, sigma: f64, rho: &[f64]) -> Result<(), String> {
         let ds = sigma - self.sigma;
         if ds.abs() > 0.0 {
             for j in 0..self.n {
-                self.k_upper.x[self.diag_map[j]] += ds;
+                self.k_upper.nzval[self.diag_map[j]] += ds;
             }
             self.sigma = sigma;
         }
         for i in 0..self.m {
-            self.k_upper.x[self.rho_map[i]] = -1.0 / rho[i];
+            self.k_upper.nzval[self.rho_map[i]] = -1.0 / rho[i];
         }
-        self.k_perm = self.k_upper.permute_sym_upper(&self.perm);
-        self.refactor()
+        // Only the changed diagonal entries need syncing.
+        let mut idx = Vec::with_capacity(self.n + self.m);
+        let mut vals = Vec::with_capacity(self.n + self.m);
+        for j in 0..self.n {
+            let p = self.diag_map[j];
+            idx.push(p);
+            vals.push(self.k_upper.nzval[p]);
+        }
+        for i in 0..self.m {
+            let p = self.rho_map[i];
+            idx.push(p);
+            vals.push(self.k_upper.nzval[p]);
+        }
+        self.ldl.update_values(&idx, &vals);
+        self.ldl.refactor().map_err(|e| e.to_string())
     }
 
     pub fn update_pa(
@@ -135,7 +131,6 @@ impl KktSystem {
         self.diag_map = diag_map;
         self.rho_map = rho_map;
         self.sigma = sigma;
-        self.k_perm = self.k_upper.permute_sym_upper(&self.perm);
         self.refactor()
     }
 }
@@ -150,18 +145,23 @@ fn assemble_upper(
     a: &CscMatrix,
     sigma: f64,
     rho: &[f64],
-) -> (CscMatrix, Vec<usize>, Vec<usize>, Vec<usize>, Vec<usize>) {
+) -> (
+    CscMatrix,
+    Vec<usize>,
+    Vec<usize>,
+    Vec<usize>,
+    Vec<usize>,
+) {
     let n = p_upper.n;
     let m = a.m;
     let ntot = n + m;
     let mut trips: Vec<(usize, usize, f64)> = Vec::new();
 
-    // P + σI
     let mut has_diag = vec![false; n];
     for j in 0..n {
-        for p in p_upper.col_ptr[j]..p_upper.col_ptr[j + 1] {
-            let i = p_upper.row_idx[p];
-            let mut v = p_upper.x[p];
+        for p in p_upper.colptr[j]..p_upper.colptr[j + 1] {
+            let i = p_upper.rowval[p];
+            let mut v = p_upper.nzval[p];
             if i == j {
                 v += sigma;
                 has_diag[j] = true;
@@ -175,33 +175,30 @@ fn assemble_upper(
         }
     }
 
-    // A' in the (1,2) block: column n+r, row c, value A[r,c]
     for c in 0..n {
-        for p in a.col_ptr[c]..a.col_ptr[c + 1] {
-            let r = a.row_idx[p];
-            trips.push((c, n + r, a.x[p]));
+        for p in a.colptr[c]..a.colptr[c + 1] {
+            let r = a.rowval[p];
+            trips.push((c, n + r, a.nzval[p]));
         }
     }
 
-    // -1/ρ on the (2,2) diagonal
     for r in 0..m {
         trips.push((n + r, n + r, -1.0 / rho[r]));
     }
 
     let k = CscMatrix::from_triplets_keep_zeros(ntot, ntot, &trips);
 
-    // Maps: locate stored values. For P we map each upper nnz onto K.
     let mut p_map = Vec::with_capacity(p_upper.nnz());
     for j in 0..n {
-        for p in p_upper.col_ptr[j]..p_upper.col_ptr[j + 1] {
-            let i = p_upper.row_idx[p];
+        for p in p_upper.colptr[j]..p_upper.colptr[j + 1] {
+            let i = p_upper.rowval[p];
             p_map.push(find_entry(&k, i, j));
         }
     }
     let mut a_map = Vec::with_capacity(a.nnz());
     for c in 0..n {
-        for p in a.col_ptr[c]..a.col_ptr[c + 1] {
-            let r = a.row_idx[p];
+        for p in a.colptr[c]..a.colptr[c + 1] {
+            let r = a.rowval[p];
             a_map.push(find_entry(&k, c, n + r));
         }
     }
@@ -217,8 +214,8 @@ fn assemble_upper(
 }
 
 fn find_entry(k: &CscMatrix, row: usize, col: usize) -> usize {
-    for p in k.col_ptr[col]..k.col_ptr[col + 1] {
-        if k.row_idx[p] == row {
+    for p in k.colptr[col]..k.colptr[col + 1] {
+        if k.rowval[p] == row {
             return p;
         }
     }

@@ -50,7 +50,7 @@ impl Default for Settings {
             adaptive_rho_max_adaptions: 8,
             check_termination: 25,
             check_infeasibility: 40,
-            iterative_refinement: 1,
+            iterative_refinement: 2,
             scaling_iter: 10,
             verbose: false,
             anderson_memory: 5,

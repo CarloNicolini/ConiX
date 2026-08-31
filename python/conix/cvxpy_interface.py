@@ -1,6 +1,6 @@
 """CVXPY adapter for ConiX (adapted from COSMO.rs ``cvxpy_interface``).
 
-Extracts CVXPY canonical conic data and calls ConiX through the ctypes ABI.
+Extracts CVXPY canonical conic data and calls ConiX through the native maturin/PyO3 extension (ctypes fallback).
 Form matches Clarabel: ``Ax + s = b``, ``s ∈ K``.
 """
 
@@ -24,7 +24,12 @@ try:
 except ImportError:  # older cvxpy
     SvecPSD = None
 
-from .solver import ConixSolver
+def _get_conix_solver():
+    """Late bind so ``import conix`` can finish before cvxpy registration."""
+    import conix as cx
+
+    return cx.ConixSolver
+
 
 
 class CONIX(ConicSolver):
@@ -173,7 +178,7 @@ class CONIX(ConicSolver):
                 solver = None
 
         if solver is None:
-            solver = ConixSolver(P, q, A, b, cones, **opts)
+            solver = _get_conix_solver()(P, q, A, b, cones, **opts)
             if warm_start and cached is not None and isinstance(cached, dict) and "result" in cached:
                 old = cached["result"]
                 try:

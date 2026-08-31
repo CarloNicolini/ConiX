@@ -1,5 +1,8 @@
 /target
+target/
 **/*.rs.bk
-.venv
+.venv/
+*.so
+*.pyc
 **/__pycache__/
-
+.pytest_cache/

@@ -1,4 +1,4 @@
-use crate::algebra::CscMatrix;
+use crate::algebra::{CscExt, CscMatrix};
 use crate::cones::CompositeCone;
 use crate::kkt::KktSystem;
 use crate::scale::Equilibration;

@@ -1,4 +1,4 @@
-use conix::algebra::{CscMatrix, LdlNumeric, LdlSymbolic};
+use conix::algebra::{qdldl_factor_qd, CscExt, CscMatrix};
 use conix::cones::CompositeCone;
 use conix::cones::Cone;
 use conix::models;
@@ -17,7 +17,7 @@ fn dense_sym_mul(a: &[Vec<f64>], x: &[f64]) -> Vec<f64> {
 }
 
 #[test]
-fn ldl_matches_dense_spd() {
+fn qdldl_matches_dense_spd() {
     let a = CscMatrix::from_triplets(
         3,
         3,
@@ -29,10 +29,9 @@ fn ldl_matches_dense_spd() {
             (2, 2, 2.0),
         ],
     );
-    let sym = LdlSymbolic::analyze(&a).unwrap();
-    let fac = LdlNumeric::factor(&a, &sym).unwrap();
+    let mut fac = qdldl_factor_qd(&a, 3, 1e-14).unwrap();
     let mut b = vec![1.0, 2.0, 3.0];
-    fac.solve_in_place(&mut b);
+    fac.solve(&mut b);
     let dense = a.to_dense();
     // complete symmetric dense
     let mut s = vec![vec![0.0; 3]; 3];
@@ -287,7 +286,7 @@ fn sequential_cvar_r1() {
 #[test]
 fn exp_cone_log() {
     // min t  s.t. (1, 1, t) ∈ EXP  ⇒  t ≥ e
-    let p = CscMatrix::zeros(1, 1);
+    let p = CscMatrix::zeros((1, 1));
     let q = vec![1.0];
     let a = CscMatrix::from_triplets(3, 1, &[(2, 0, -1.0)]);
     let b = vec![1.0, 1.0, 0.0];
@@ -489,7 +488,7 @@ fn verifier_independent() {
 #[test]
 fn ipm_primal_infeasible_lp() {
     // x >= 1 and x <= 0.
-    let p = CscMatrix::zeros(1, 1);
+    let p = CscMatrix::zeros((1, 1));
     let q = vec![0.0];
     let a = CscMatrix::from_triplets(2, 1, &[(0, 0, -1.0), (1, 0, 1.0)]);
     let b = vec![-1.0, 0.0];
@@ -503,7 +502,7 @@ fn ipm_primal_infeasible_lp() {
 
 #[test]
 fn ipm_kkt_cone_blocks_not_dense() {
-    let p = CscMatrix::zeros(1, 1);
+    let p = CscMatrix::zeros((1, 1));
     let a = CscMatrix::from_triplets(9, 1, &[(0, 0, 1.0), (3, 0, -1.0), (6, 0, 0.5)]);
     let cones = CompositeCone::new(vec![
         Cone::Nonnegative { dim: 3 },
@@ -544,7 +543,7 @@ fn psd_ipm_interior() {
 #[test]
 fn psd_ipm_schur() {
     // min t s.t. x = 1 and [[1, x],[x, t]] ⪰ 0  → (x, t) = (1, 1).
-    let p = CscMatrix::zeros(2, 2);
+    let p = CscMatrix::zeros((2, 2));
     let q = vec![0.0, 1.0];
     let s2 = std::f64::consts::SQRT_2;
     let a = CscMatrix::from_triplets(
@@ -601,7 +600,7 @@ fn sequential_psd_r0() {
 
 #[test]
 fn ipm_kkt_psd_block() {
-    let p = CscMatrix::zeros(1, 1);
+    let p = CscMatrix::zeros((1, 1));
     let a = CscMatrix::from_triplets(3, 1, &[(0, 0, -1.0), (2, 0, -1.0)]);
     let cones = CompositeCone::new(vec![Cone::PsdTriangle { side: 2 }]);
     let k = conix::ipm_kkt::IpmKkt::analyze(&p, &a, &cones).unwrap();

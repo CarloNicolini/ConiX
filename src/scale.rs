@@ -1,6 +1,6 @@
 //! Block-respecting Ruiz equilibration.
 
-use crate::algebra::CscMatrix;
+use crate::algebra::{CscExt, CscMatrix};
 use crate::cones::{CompositeCone, Cone};
 
 #[derive(Clone, Debug)]
@@ -42,14 +42,14 @@ pub fn ruiz(
     for _ in 0..iters {
         let mut coln = vec![0.0_f64; n];
         for j in 0..n {
-            for idx in p.col_ptr[j]..p.col_ptr[j + 1] {
-                let i = p.row_idx[idx];
-                let v = p.x[idx].abs();
+            for idx in p.colptr[j]..p.colptr[j + 1] {
+                let i = p.rowval[idx];
+                let v = p.nzval[idx].abs();
                 coln[j] = coln[j].max(v);
                 coln[i] = coln[i].max(v);
             }
-            for idx in a.col_ptr[j]..a.col_ptr[j + 1] {
-                coln[j] = coln[j].max(a.x[idx].abs());
+            for idx in a.colptr[j]..a.colptr[j + 1] {
+                coln[j] = coln[j].max(a.nzval[idx].abs());
             }
         }
         let rown = a.row_inf_norms();
@@ -79,15 +79,15 @@ pub fn ruiz(
             }
         }
         for j in 0..p.n {
-            for idx in p.col_ptr[j]..p.col_ptr[j + 1] {
-                let i = p.row_idx[idx];
-                p.x[idx] *= dstep[i] * dstep[j];
+            for idx in p.colptr[j]..p.colptr[j + 1] {
+                let i = p.rowval[idx];
+                p.nzval[idx] *= dstep[i] * dstep[j];
             }
         }
         for j in 0..a.n {
-            for idx in a.col_ptr[j]..a.col_ptr[j + 1] {
-                let i = a.row_idx[idx];
-                a.x[idx] *= estep[i] * dstep[j];
+            for idx in a.colptr[j]..a.colptr[j + 1] {
+                let i = a.rowval[idx];
+                a.nzval[idx] *= estep[i] * dstep[j];
             }
         }
         for i in 0..n {
@@ -104,7 +104,7 @@ pub fn ruiz(
         .max(q.iter().fold(0.0_f64, |m, &v| m.max(v.abs())))
         .max(1.0);
     let c = 1.0 / pmax;
-    for v in p.x.iter_mut() {
+    for v in p.nzval.iter_mut() {
         *v *= c;
     }
     for v in q.iter_mut() {
