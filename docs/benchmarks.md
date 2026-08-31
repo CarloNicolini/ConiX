@@ -74,8 +74,8 @@ as a Farkas ray (`ipm_primal_infeasible_lp`).
   are the status authority; the Python sequential API (`python/conix`) drives the same
   workspace (CVaR R1, EVaR IPM).
 - Does not prove: dominance over OSQP on small bound QPs (OSQP still wins R0 Markowitz);
-  a production genpower sparse-expansion / PSD Nesterov–Todd Hessian (those cones are
-  projected, but CVaR/MAD/EVaR/CDaR do not require them).
+  a production PSD Nesterov–Todd Hessian (PSD is projected; CVaR/MAD/EVaR/CDaR do not
+  require it). Generalized power uses Clarabel's dual Hessian as a dense triangle.
 
 Reproduce:
 

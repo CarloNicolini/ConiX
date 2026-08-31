@@ -214,7 +214,7 @@ Use Clarabel’s quadratic homogeneous embedding. Linearization reduces every Ne
 \begin{bmatrix} P & A^\top \\ A & -H_s \end{bmatrix}
 \]
 
-and a 2×2 reduction for \(\Delta\tau\) (constant solve \(K[x_2;z_2]=[-q;b]\), then \(\Delta x=x_1+\Delta\tau x_2\)). \(H_s\) is block-diagonal: diagonal \(s./z\) on Zero/NN, packed upper triangle on SOC (Nesterov–Todd), exponential, and 3D power. AMD order and the symbolic factor persist across Newton steps and across sequential **R1** updates that keep the \((P,A)\) pattern. Only the numeric \(H_s\) values and the LDL numbers change.
+and a 2×2 reduction for \(\Delta\tau\) (constant solve \(K[x_2;z_2]=[-q;b]\), then \(\Delta x=x_1+\Delta\tau x_2\)). \(H_s\) is block-diagonal: diagonal \(s./z\) on Zero/NN, packed upper triangle on SOC (Nesterov–Todd), exponential, 3D power, and generalized power (Clarabel \(D+pp^\top-qq^\top-rr^\top\) as a dense triangle; equivalent to Clarabel's sparse expansion for small cones). AMD order and the symbolic factor persist across Newton steps and across sequential **R1** updates that keep the \((P,A)\) pattern. Only the numeric \(H_s\) values and the LDL numbers change.
 
 Symmetric cones use Nesterov–Todd scaling. On **polyhedral** cones the NT Hessian is diagonal, \(H=\mathrm{diag}(s./z)\). Nonsymmetric cones use Clarabel’s dual-barrier Hessian \(\nabla^2 f^\ast(z)\) (and the derived primal-dual \(H_s\) when the step is large enough), unit initialization, and the linearized centrality
 

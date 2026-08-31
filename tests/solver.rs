@@ -435,6 +435,32 @@ fn power_cone_bound() {
 }
 
 #[test]
+fn genpower_cone_bound() {
+    // min 1/2 (x^2+y^2) s.t. (x,y,z) ∈ GP(0.5,0.5) with z=0 and x+y=2.
+    let p = CscMatrix::identity(2);
+    let q = vec![0.0, 0.0];
+    let a = CscMatrix::from_triplets(
+        4,
+        2,
+        &[(0, 0, 1.0), (0, 1, 1.0), (1, 0, -1.0), (2, 1, -1.0)],
+    );
+    let b = vec![2.0, 0.0, 0.0, 0.0];
+    let cones = CompositeCone::new(vec![
+        Cone::Zero { dim: 1 },
+        Cone::GenPower {
+            alpha: vec![0.5, 0.5],
+            n_z: 1,
+        },
+    ]);
+    let mut st = Settings::default();
+    st.engine = EngineKind::Ipm;
+    st.ipm_max_iter = 50;
+    let sol = solve_once(Qcp { p, q, a, b, cones }, st).unwrap();
+    assert_eq!(sol.info.status, Status::Solved, "genpower {:?}", sol.info);
+    assert!((sol.x[0] + sol.x[1] - 2.0).abs() < 1e-4, "{:?}", sol.x);
+}
+
+#[test]
 fn verifier_independent() {
     let p = CscMatrix::identity(1);
     let q = vec![-1.0];

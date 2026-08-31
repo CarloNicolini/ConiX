@@ -493,6 +493,16 @@ fn combined_c(ws: &Workspace, sigma: f64, mu: f64, ds_aff: &[f64], dz_aff: &[f64
                     }
                 }
             }
+            Cone::GenPower { alpha, n_z } => {
+                let d = cone.dim();
+                if let Some((g, _)) =
+                    crate::cones::genpower_dual_grad_h(&ws.z[off..off + d], alpha, *n_z)
+                {
+                    for k in 0..d {
+                        c[off + k] += sigu * g[k];
+                    }
+                }
+            }
             Cone::SecondOrder { dim } => {
                 c[off] -= sigu;
                 for k in 0..*dim {
@@ -529,12 +539,15 @@ fn pack_hs(ws: &Workspace, packed: &mut [f64], mu: f64, primal_dual: bool) -> bo
                     po += 1;
                 }
             }
-            Cone::GenPower { .. } => {
+            Cone::GenPower { alpha, n_z } => {
                 let d = cone.dim();
-                for k in 0..d {
-                    packed[po] = mu / ws.z[off + k].abs().max(1e-8).powi(2);
-                    po += 1;
-                }
+                let Some((_, hd)) =
+                    crate::cones::genpower_dual_grad_h(&ws.z[off..off + d], alpha, *n_z)
+                else {
+                    return false;
+                };
+                let hs: Vec<f64> = hd.iter().map(|v| mu * v).collect();
+                po = pack_dense(packed, po, d, &hs);
             }
             Cone::SecondOrder { dim } => {
                 if let Some(hs) =
@@ -627,6 +640,11 @@ fn unit_initialize(ws: &mut Workspace) {
                 ws.s[off..off + 3].copy_from_slice(&u);
                 ws.z[off..off + 3].copy_from_slice(&u);
             }
+            Cone::GenPower { alpha, n_z } => {
+                let u = crate::cones::genpower_unit_point(alpha, *n_z);
+                ws.s[off..off + u.len()].copy_from_slice(&u);
+                ws.z[off..off + u.len()].copy_from_slice(&u);
+            }
             _ => {
                 for k in 0..cone.dim() {
                     ws.s[off + k] = 1.0;
@@ -691,6 +709,16 @@ fn max_step(ws: &Workspace, ds: &[f64]) -> f64 {
                     false,
                 ));
             }
+            Cone::GenPower { alpha, n_z } => {
+                let d = cone.dim();
+                a = a.min(crate::cones::genpower_backtrack(
+                    &ws.s[off..off + d],
+                    &ds[off..off + d],
+                    alpha,
+                    *n_z,
+                    true,
+                ));
+            }
             _ => {
                 for k in 0..cone.dim() {
                     if ds[off + k] < 0.0 && ws.s[off + k] > 0.0 {
@@ -745,6 +773,16 @@ fn max_step_dual(ws: &Workspace, dz: &[f64]) -> f64 {
                     &dz[off..off + 3],
                     *alpha,
                     true,
+                ));
+            }
+            Cone::GenPower { alpha, n_z } => {
+                let d = cone.dim();
+                a = a.min(crate::cones::genpower_backtrack(
+                    &ws.z[off..off + d],
+                    &dz[off..off + d],
+                    alpha,
+                    *n_z,
+                    false,
                 ));
             }
             _ => {}

@@ -158,9 +158,7 @@ pub(crate) fn exp_hs(s: &[f64], z: &[f64], mu: f64, primal_dual: bool) -> Option
         }
         for i in 0..3 {
             for j in i..3 {
-                let v = s[i] * s[j] / dot_sz
-                    + ds[i] * ds[j] / dot_dsz
-                    + t * axis[i] * axis[j];
+                let v = s[i] * s[j] / dot_sz + ds[i] * ds[j] / dot_dsz + t * axis[i] * axis[j];
                 hs[i * 3 + j] = v;
                 hs[j * 3 + i] = v;
             }
@@ -220,8 +218,7 @@ pub(crate) fn power_dual_grad_h(z: &[f64], alpha: f64) -> Option<([f64; 3], [f64
     let h00 = gpsi[0] * gpsi[0] - 2.0 * a * (2.0 * a - 1.0) * phi / (z[0] * z[0] * psi)
         + (1.0 - a) / (z[0] * z[0]);
     let h01 = gpsi[0] * gpsi[1] - 4.0 * a * (1.0 - a) * phi / (z[0] * z[1] * psi);
-    let h11 = gpsi[1] * gpsi[1]
-        - 2.0 * (1.0 - a) * (1.0 - 2.0 * a) * phi / (z[1] * z[1] * psi)
+    let h11 = gpsi[1] * gpsi[1] - 2.0 * (1.0 - a) * (1.0 - 2.0 * a) * phi / (z[1] * z[1] * psi)
         + a / (z[1] * z[1]);
     let h02 = gpsi[0] * gpsi[2];
     let h12 = gpsi[1] * gpsi[2];
@@ -317,6 +314,177 @@ pub(crate) fn soc_nt_hessian(s: &[f64], z: &[f64]) -> Option<Vec<f64>> {
     }
 }
 
+pub(crate) fn genpower_primal_interior(s: &[f64], alpha: &[f64], n_z: usize) -> bool {
+    let n1 = alpha.len();
+    if s.len() != n1 + n_z || n1 == 0 {
+        return false;
+    }
+    let mut logphi = 0.0_f64;
+    for i in 0..n1 {
+        if s[i] <= 0.0 {
+            return false;
+        }
+        logphi += 2.0 * alpha[i] * s[i].ln();
+    }
+    let phi = logphi.exp();
+    if !phi.is_finite() {
+        return false;
+    }
+    let mut n2 = 0.0_f64;
+    for &v in &s[n1..] {
+        n2 += v * v;
+    }
+    phi > n2 + 1e-16
+}
+
+pub(crate) fn genpower_dual_interior(z: &[f64], alpha: &[f64], n_z: usize) -> bool {
+    let n1 = alpha.len();
+    if z.len() != n1 + n_z || n1 == 0 {
+        return false;
+    }
+    let mut logphi = 0.0_f64;
+    for i in 0..n1 {
+        if z[i] <= 0.0 || alpha[i] <= 0.0 {
+            return false;
+        }
+        logphi += 2.0 * alpha[i] * (z[i] / alpha[i]).ln();
+    }
+    let phi = logphi.exp();
+    if !phi.is_finite() {
+        return false;
+    }
+    let mut n2 = 0.0_f64;
+    for &v in &z[n1..] {
+        n2 += v * v;
+    }
+    phi > n2 + 1e-16
+}
+
+pub(crate) fn genpower_unit_point(alpha: &[f64], n_z: usize) -> Vec<f64> {
+    let n1 = alpha.len();
+    let mut u = vec![0.0; n1 + n_z];
+    for i in 0..n1 {
+        u[i] = (1.0 + alpha[i]).sqrt();
+    }
+    u
+}
+
+/// Dual barrier gradient and Hessian \(H = D + pp^\top - qq^\top - rr^\top\)
+/// (Clarabel `update_dual_grad_H` / `mul_Hs` without the extra sparse columns).
+pub(crate) fn genpower_dual_grad_h(
+    z: &[f64],
+    alpha: &[f64],
+    n_z: usize,
+) -> Option<(Vec<f64>, Vec<f64>)> {
+    if !genpower_dual_interior(z, alpha, n_z) {
+        return None;
+    }
+    let n1 = alpha.len();
+    let dim = n1 + n_z;
+    let mut phi = 1.0_f64;
+    for i in 0..n1 {
+        phi *= (z[i] / alpha[i]).powf(2.0 * alpha[i]);
+    }
+    if !phi.is_finite() {
+        return None;
+    }
+    let mut n2 = 0.0_f64;
+    for &v in &z[n1..] {
+        n2 += v * v;
+    }
+    let zeta = phi - n2;
+    if zeta <= 1e-16 {
+        return None;
+    }
+    let mut tau = vec![0.0; n1];
+    let mut grad = vec![0.0; dim];
+    for i in 0..n1 {
+        tau[i] = 2.0 * alpha[i] / z[i];
+        grad[i] = -tau[i] * phi / zeta - (1.0 - alpha[i]) / z[i];
+    }
+    for i in 0..n_z {
+        grad[n1 + i] = 2.0 / zeta * z[n1 + i];
+    }
+    let mut d1 = vec![0.0; n1];
+    for i in 0..n1 {
+        d1[i] = tau[i] * phi / (zeta * z[i]) + (1.0 - alpha[i]) / (z[i] * z[i]);
+    }
+    let d2 = 2.0 / zeta;
+    let p0 = (phi * (phi + n2) / 2.0).sqrt();
+    if p0 <= 1e-16 {
+        return None;
+    }
+    let p1 = -2.0 * phi / p0;
+    let q0 = (zeta * phi / 2.0).sqrt();
+    let r1 = 2.0 * (zeta / (phi + n2)).sqrt();
+    let mut p = vec![0.0; dim];
+    for i in 0..n1 {
+        p[i] = (p0 / zeta) * tau[i];
+    }
+    for i in 0..n_z {
+        p[n1 + i] = (p1 / zeta) * z[n1 + i];
+    }
+    let mut q = vec![0.0; n1];
+    for i in 0..n1 {
+        q[i] = (q0 / zeta) * tau[i];
+    }
+    let mut r = vec![0.0; n_z];
+    for i in 0..n_z {
+        r[i] = (r1 / zeta) * z[n1 + i];
+    }
+    let mut h = vec![0.0; dim * dim];
+    for i in 0..dim {
+        let di = if i < n1 { d1[i] } else { d2 };
+        for j in 0..dim {
+            let mut v = p[i] * p[j];
+            if i < n1 && j < n1 {
+                v -= q[i] * q[j];
+            }
+            if i >= n1 && j >= n1 {
+                v -= r[i - n1] * r[j - n1];
+            }
+            if i == j {
+                v += di;
+            }
+            h[i * dim + j] = v;
+        }
+    }
+    if grad.iter().chain(h.iter()).all(|v| v.is_finite()) {
+        Some((grad, h))
+    } else {
+        None
+    }
+}
+
+pub(crate) fn genpower_backtrack(
+    x: &[f64],
+    d: &[f64],
+    alpha: &[f64],
+    n_z: usize,
+    primal: bool,
+) -> f64 {
+    let mut a = 1.0_f64;
+    let mut w = vec![0.0; x.len()];
+    for _ in 0..48 {
+        for i in 0..x.len() {
+            w[i] = x[i] + a * d[i];
+        }
+        let ok = if primal {
+            genpower_primal_interior(&w, alpha, n_z)
+        } else {
+            genpower_dual_interior(&w, alpha, n_z)
+        };
+        if ok {
+            return a;
+        }
+        a *= 0.8;
+        if a < 1e-14 {
+            return 0.0;
+        }
+    }
+    a
+}
+
 fn soc_sqrt_res(x: &[f64]) -> Option<f64> {
     let mut r = x[0] * x[0];
     for &v in &x[1..] {
@@ -364,6 +532,18 @@ mod tests {
         assert!(power_primal_interior(&u, 0.5));
         assert!(power_dual_interior(&u, 0.5));
         let (g, h) = power_dual_grad_h(&u, 0.5).unwrap();
+        assert!(h[0] > 0.0);
+        assert!(g.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn genpower_unit_hessian() {
+        let alpha = vec![0.5, 0.5];
+        let u = genpower_unit_point(&alpha, 1);
+        assert!(genpower_primal_interior(&u, &alpha, 1));
+        assert!(genpower_dual_interior(&u, &alpha, 1));
+        let (g, h) = genpower_dual_grad_h(&u, &alpha, 1).unwrap();
+        assert_eq!(g.len(), 3);
         assert!(h[0] > 0.0);
         assert!(g.iter().all(|v| v.is_finite()));
     }

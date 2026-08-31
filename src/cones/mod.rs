@@ -78,10 +78,7 @@ impl Cone {
     /// GenPower is stored as diagonal plus a later sparse expansion; without that
     /// expansion we still treat it as diagonal (Clarabel `get_Hs` returns `D` only).
     pub fn hs_is_diagonal(&self) -> bool {
-        matches!(
-            self,
-            Cone::Zero { .. } | Cone::Nonnegative { .. } | Cone::GenPower { .. }
-        )
+        matches!(self, Cone::Zero { .. } | Cone::Nonnegative { .. })
     }
 
     pub fn hs_packed_len(&self) -> usize {

@@ -4,10 +4,10 @@
 //! K = \begin{bmatrix} P+\sigma I & A^\top \\ A & -H_s \end{bmatrix}
 //! \]
 //!
-//! \(H_s\) is block-diagonal across cones: a diagonal for Zero/NN (and the
-//! diagonal part of genpower), and a packed upper triangle for SOC / exp /
-//! power / PSD. AMD order and the symbolic factor stay valid across Newton
-//! steps and across sequential R1 updates that keep the \((P,A)\) pattern.
+//! \(H_s\) is block-diagonal across cones: a diagonal for Zero/NN, and a packed
+//! upper triangle for SOC / exp / power / genpower / PSD. AMD order and the
+//! symbolic factor stay valid across Newton steps and across sequential R1
+//! updates that keep the \((P,A)\) pattern.
 
 use crate::algebra::amd::order_upper;
 use crate::algebra::csc::{inv_permute, permute, CscMatrix};
