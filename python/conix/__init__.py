@@ -96,6 +96,41 @@ def _load() -> ctypes.CDLL:
     lib.conix_cdar.restype = c_void_p
     lib.conix_cdar.argtypes = lib.conix_cvar.argtypes
     lib.conix_mean_variance.restype = c_void_p
+    lib.conix_mean_variance.argtypes = [
+        c_size_t,
+        POINTER(c_size_t),
+        POINTER(c_size_t),
+        POINTER(c_double),
+        c_size_t,
+        POINTER(c_double),
+        POINTER(c_double),
+        POINTER(c_double),
+        c_double,
+        c_int,
+    ]
+    lib.conix_update_mean_variance.argtypes = [
+        c_void_p,
+        c_size_t,
+        POINTER(c_size_t),
+        POINTER(c_size_t),
+        POINTER(c_double),
+        c_size_t,
+        POINTER(c_double),
+        POINTER(c_double),
+        POINTER(c_double),
+        c_double,
+    ]
+    lib.conix_update_mean_variance.restype = c_int
+    lib.conix_update_mad.argtypes = [
+        c_void_p,
+        c_size_t,
+        c_size_t,
+        POINTER(c_double),
+        POINTER(c_double),
+        POINTER(c_double),
+        POINTER(c_double),
+    ]
+    lib.conix_update_mad.restype = c_int
     lib.conix_solve.argtypes = [c_void_p]
     lib.conix_solve.restype = c_int
     lib.conix_n.argtypes = [c_void_p]
@@ -171,6 +206,31 @@ def _rowmajor(rows: list[list[float]]) -> ctypes.Array:
     n = len(rows[0]) if t else 0
     flat = [float(v) for row in rows for v in row]
     return (c_double * (t * n))(*flat)
+
+
+def _sigma_ptrs(sigma):
+    """CSC upper triangle arrays for ``conix_mean_variance`` (numpy or nested lists)."""
+    try:
+        import numpy as np
+        from conix.qcp import upper_triplet
+
+        if hasattr(sigma, "shape"):
+            col_ptr, row_idx, x = upper_triplet(np.asarray(sigma, dtype=np.float64))
+            n = int(col_ptr.size - 1)
+            nnz = int(x.size)
+            col_arr = (c_size_t * (n + 1))(*[int(v) for v in col_ptr])
+            row_arr = (c_size_t * nnz)(*[int(v) for v in row_idx])
+            x_arr = (c_double * nnz)(*[float(v) for v in x])
+            return n, col_arr, row_arr, x_arr, nnz
+    except ImportError:
+        pass
+    raise TypeError("sigma must be a numpy array; install numpy for mean-variance API")
+
+
+def _as_f64_list(v) -> list[float]:
+    if hasattr(v, "tolist"):
+        return [float(x) for x in v.tolist()]
+    return [float(x) for x in v]
 
 
 class Solution:
@@ -295,6 +355,50 @@ class Workspace:
         if lib().conix_update_q(self._ptr, arr, len(q)) != 0:
             raise RuntimeError(last_error())
 
+    def update_mean_variance(
+        self,
+        sigma,
+        mu,
+        l: list[float],
+        u: list[float],
+        lam: float,
+    ) -> None:
+        n, col_arr, row_arr, x_arr, nnz = _sigma_ptrs(sigma)
+        mu_arr, _ = _dptr(_as_f64_list(mu))
+        lb, _ = _dptr(l)
+        ub, _ = _dptr(u)
+        rc = lib().conix_update_mean_variance(
+            self._ptr,
+            n,
+            col_arr,
+            row_arr,
+            x_arr,
+            nnz,
+            mu_arr,
+            lb,
+            ub,
+            float(lam),
+        )
+        if rc != 0:
+            raise RuntimeError(last_error())
+
+    def update_mad(
+        self,
+        returns: list[list[float]],
+        probs: list[float],
+        l: list[float],
+        u: list[float],
+    ) -> None:
+        t = len(returns)
+        n = len(l)
+        r = _rowmajor(returns)
+        pr, _ = _dptr(probs)
+        lb, _ = _dptr(l)
+        ub, _ = _dptr(u)
+        rc = lib().conix_update_mad(self._ptr, t, n, r, pr, lb, ub)
+        if rc != 0:
+            raise RuntimeError(last_error())
+
 
 def cvar(
     returns: list[list[float]],
@@ -342,6 +446,34 @@ def mad(
     lb, _ = _dptr(l)
     ub, _ = _dptr(u)
     return Workspace(lib().conix_mad(t, n, r, pr, lb, ub, int(engine)))
+
+
+def mean_variance(
+    sigma,
+    mu,
+    l: list[float],
+    u: list[float],
+    lam: float,
+    engine: int = AUTO,
+) -> Workspace:
+    n, col_arr, row_arr, x_arr, nnz = _sigma_ptrs(sigma)
+    mu_arr, _ = _dptr(_as_f64_list(mu))
+    lb, _ = _dptr(l)
+    ub, _ = _dptr(u)
+    return Workspace(
+        lib().conix_mean_variance(
+            n,
+            col_arr,
+            row_arr,
+            x_arr,
+            nnz,
+            mu_arr,
+            lb,
+            ub,
+            float(lam),
+            int(engine),
+        )
+    )
 
 
 def cdar(

@@ -426,6 +426,42 @@ pub unsafe extern "C" fn conix_update_evar(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn conix_update_mean_variance(
+    p: *mut Workspace,
+    n: usize,
+    sigma_col: *const usize,
+    sigma_row: *const usize,
+    sigma_x: *const c_double,
+    sigma_nnz: usize,
+    mu: *const c_double,
+    l: *const c_double,
+    u: *const c_double,
+    lambda: c_double,
+) -> c_int {
+    match catch(|| {
+        let ws = ws_mut(p)?;
+        let sigma = csc_from_raw(n, n, sigma_col, sigma_row, sigma_x, sigma_nnz, false)?;
+        if mu.is_null() || l.is_null() || u.is_null() {
+            return Err("null mean_variance vector".into());
+        }
+        let qcp = models::mean_variance(
+            &sigma,
+            slice::from_raw_parts(mu, n),
+            slice::from_raw_parts(l, n),
+            slice::from_raw_parts(u, n),
+            lambda,
+        );
+        apply_qcp(ws, &qcp)
+    }) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_err(&e);
+            -1
+        }
+    }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn conix_update_mad(
     p: *mut Workspace,
     t: usize,
