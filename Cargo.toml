@@ -1,0 +1,19 @@
+[package]
+name = "conix"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Sequential conic optimizer for rolling convex programs"
+repository = "https://github.com/CarloNicolini/ConiX"
+readme = "README.md"
+
+[lib]
+name = "conix"
+path = "src/lib.rs"
+
+[dependencies]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3

@@ -20,4 +20,11 @@ State that is persisted is typed: symbolic sparsity, numeric factorization, iter
 
 ## Status
 
-Mathematics-first design. No solver kernel yet.
+Rust kernel is in tree: sequential workspace, cached quasi-definite LDL, proximal ADMM, homogeneous DR, IPM fallback, cone projections (zero, nonnegative, SOC, exponential, power, genpower, PSD), and finance builders (mean-variance, CVaR, MAD, CDaR, EVaR).
+
+```bash
+cargo test
+```
+
+Correctness is checked by an independent residual/ray verifier. Sequence-level speed vs Clarabel/SCS/OSQP is not claimed until those benchmarks exist.
+
