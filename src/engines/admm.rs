@@ -153,12 +153,7 @@ fn recover_z(ws: &mut Workspace, n: usize) {
     }
 }
 
-fn scaled_residuals(
-    ws: &Workspace,
-    ax: &mut [f64],
-    px: &mut [f64],
-    atz: &mut [f64],
-) -> (f64, f64) {
+fn scaled_residuals(ws: &Workspace, ax: &mut [f64], px: &mut [f64], atz: &mut [f64]) -> (f64, f64) {
     ws.a.mul(&ws.x, ax);
     let mut rp = 0.0_f64;
     for i in 0..ax.len() {
@@ -248,7 +243,7 @@ fn sparse_polish(ws: &mut Workspace) {
             continue;
         }
         let mut accepted = false;
-        for _ in 0..6 {
+        for _ in 0..12 {
             let a_eq = ws.a.select_rows(&eq_rows);
             let mut b_eq = vec![0.0; eq_rows.len()];
             for (t, &row) in eq_rows.iter().enumerate() {
@@ -264,27 +259,37 @@ fn sparse_polish(ws: &mut Workspace) {
             for i in 0..m {
                 sraw[i] = ws.b[i] - ax[i];
             }
-            let mut added = false;
+            let mut changed = false;
             for &i in &nn_rows {
                 if !is_eq[i] && sraw[i] < -1e-12 {
                     is_eq[i] = true;
                     eq_rows.push(i);
-                    added = true;
+                    changed = true;
                 }
             }
-            if added {
+            if changed {
                 continue;
             }
-            let mut snew = sraw;
-            ws.cones.project(&mut snew);
+            let mut snew = vec![0.0; m];
             let mut znew = vec![0.0; m];
+            for i in 0..m {
+                snew[i] = if is_eq[i] { 0.0 } else { sraw[i].max(0.0) };
+            }
             for (t, &row) in eq_rows.iter().enumerate() {
                 znew[row] = sol[n + t];
             }
+            let mut dropped = false;
             for &i in &nn_rows {
-                if znew[i] < 0.0 {
+                if is_eq[i] && znew[i] < -1e-12 {
+                    is_eq[i] = false;
+                    dropped = true;
+                } else if znew[i] < 0.0 {
                     znew[i] = 0.0;
                 }
+            }
+            if dropped {
+                eq_rows.retain(|&r| is_eq[r]);
+                continue;
             }
             let r_old = ws.original_residuals();
             let r_new = {
@@ -303,19 +308,11 @@ fn sparse_polish(ws: &mut Workspace) {
                     &z,
                 )
             };
-            if r_new.res_pri + r_new.res_dual + r_new.res_cone
-                <= r_old.res_pri + r_old.res_dual + r_old.res_cone
-            {
+            if crate::verifier::merit(&r_new) <= crate::verifier::merit(&r_old) {
                 ws.x = xnew;
                 ws.s = snew;
                 ws.z = znew;
-                ws.w[..n].copy_from_slice(&ws.x);
-                ws.w_prev[..n].copy_from_slice(&ws.x);
-                for i in 0..m {
-                    let wi = ws.s[i] - ws.z[i] / ws.rho[i];
-                    ws.w[n + i] = wi;
-                    ws.w_prev[n + i] = wi;
-                }
+                ws.sync_w();
                 accepted = true;
                 if crate::verifier::solved_at(&r_new, eps) {
                     return;

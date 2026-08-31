@@ -227,7 +227,13 @@ impl Workspace {
             self.s[i] = self.b[i] - ax[i];
         }
         self.cones.project(&mut self.s);
+        self.sync_w();
+    }
+
+    /// COSMO `w = [x; s - z/ρ]` from the current unscaled-in-workspace iterate.
+    pub fn sync_w(&mut self) {
         let n = self.x.len();
+        let m = self.s.len();
         self.w[..n].copy_from_slice(&self.x);
         self.w_prev[..n].copy_from_slice(&self.x);
         for i in 0..m {
@@ -284,29 +290,67 @@ fn run_engines(ws: &mut Workspace) {
         EngineKind::Ipm => crate::engines::ipm::run(ws),
         EngineKind::Splitting => crate::engines::splitting::run(ws),
         EngineKind::Admm => crate::engines::admm::run(ws),
-        EngineKind::Auto => {
-            crate::engines::admm::run(ws);
-            if ws.info.status == crate::status::Status::MaxIters {
-                let bak_x = ws.x.clone();
-                let bak_s = ws.s.clone();
-                let bak_z = ws.z.clone();
-                let bak_info = ws.info.clone();
-                crate::engines::ipm::run(ws);
-                let r_old = crate::verifier::residuals(
-                    &ws.p, &ws.q, &ws.a, &ws.b, &ws.cones, &bak_x, &bak_s, &bak_z,
-                );
-                let r_new = crate::verifier::residuals(
-                    &ws.p, &ws.q, &ws.a, &ws.b, &ws.cones, &ws.x, &ws.s, &ws.z,
-                );
-                if crate::verifier::merit(&r_new) > crate::verifier::merit(&r_old) {
-                    ws.x = bak_x;
-                    ws.s = bak_s;
-                    ws.z = bak_z;
-                    ws.info = bak_info;
-                }
-            }
-        }
+        EngineKind::Auto => run_auto(ws),
     }
+}
+
+fn run_auto(ws: &mut Workspace) {
+    let poly = ws.cones.is_polyhedral();
+    let r0_reuse = ws.has_solution && ws.last_update == crate::status::UpdateClass::R0;
+    if poly && !r0_reuse {
+        // R1/setup rebuilds the numeric factor anyway; NT-IPM is the high-accuracy
+        // polyhedral engine. ADMM is the R0 specialist (cached LDL).
+        crate::engines::ipm::run(ws);
+        if matches!(
+            ws.info.status,
+            crate::status::Status::Solved
+                | crate::status::Status::PrimalInfeasible
+                | crate::status::Status::DualInfeasible
+        ) {
+            ws.last_engine = EngineKind::Ipm;
+            return;
+        }
+        let bak_x = ws.x.clone();
+        let bak_s = ws.s.clone();
+        let bak_z = ws.z.clone();
+        let bak_info = ws.info.clone();
+        let ipm_iters = ws.info.iterations;
+        let saved_max = ws.settings.max_iter;
+        ws.settings.max_iter = saved_max.min(ws.settings.auto_admm_max_iter);
+        crate::engines::admm::run(ws);
+        ws.settings.max_iter = saved_max;
+        ws.info.iterations += ipm_iters;
+        let r_ipm = {
+            let mut x = bak_x.clone();
+            let mut s = bak_s.clone();
+            let mut z = bak_z.clone();
+            crate::scale::unscale_solution(&ws.eq, &mut x, &mut s, &mut z);
+            crate::verifier::residuals(
+                &ws.orig.p,
+                &ws.orig.q,
+                &ws.orig.a,
+                &ws.orig.b,
+                &ws.orig.cones,
+                &x,
+                &s,
+                &z,
+            )
+        };
+        let r_admm = ws.original_residuals();
+        if crate::verifier::merit(&r_admm) > crate::verifier::merit(&r_ipm) {
+            ws.x = bak_x;
+            ws.s = bak_s;
+            ws.z = bak_z;
+            ws.info = bak_info;
+            ws.sync_w();
+            ws.last_engine = EngineKind::Ipm;
+        } else {
+            ws.last_engine = EngineKind::Admm;
+        }
+        return;
+    }
+
+    crate::engines::admm::run(ws);
 }
 
 fn finalize(ws: &mut Workspace) -> Solution {
@@ -376,41 +420,8 @@ fn finalize(ws: &mut Workspace) -> Solution {
 }
 
 pub fn solve(ws: &mut Workspace) -> Solution {
-    let class = ws.last_update;
     run_engines(ws);
     let sol = finalize(ws);
-    if class == UpdateClass::R1
-        && sol.info.status != crate::status::Status::Solved
-        && (sol.info.res_pri > 1e-4 || sol.info.res_dual > 1e-4)
-    {
-        let bak_x = ws.x.clone();
-        let bak_s = ws.s.clone();
-        let bak_z = ws.z.clone();
-        let bak_info = sol.info.clone();
-        ws.x.fill(0.0);
-        ws.s.fill(0.0);
-        ws.z.fill(0.0);
-        ws.w.fill(0.0);
-        ws.w_prev.fill(0.0);
-        ws.has_solution = false;
-        run_engines(ws);
-        let sol2 = finalize(ws);
-        let m1 = bak_info.res_pri + bak_info.res_dual + bak_info.res_cone;
-        let m2 = sol2.info.res_pri + sol2.info.res_dual + sol2.info.res_cone;
-        if m2 > m1 {
-            ws.x = bak_x;
-            ws.s = bak_s;
-            ws.z = bak_z;
-            ws.info = bak_info;
-            ws.has_solution = ws.info.status == crate::status::Status::Solved;
-            let mut out = finalize(ws);
-            out.info.update_class = UpdateClass::R1;
-            ws.last_update = UpdateClass::Setup;
-            return out;
-        }
-        ws.last_update = UpdateClass::Setup;
-        return sol2;
-    }
     ws.last_update = UpdateClass::Setup;
     sol
 }

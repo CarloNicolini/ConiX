@@ -18,6 +18,11 @@ pub struct Settings {
     pub anderson_memory: usize,
     pub polish: bool,
     pub engine: EngineKind,
+    /// ADMM iteration cap used by `EngineKind::Auto` on polyhedral problems
+    /// before the NT-IPM fallback. Non-polyhedral Auto uses `max_iter`.
+    pub auto_admm_max_iter: usize,
+    /// Newton steps for the polyhedral (and dense) IPM engines.
+    pub ipm_max_iter: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,6 +54,8 @@ impl Default for Settings {
             anderson_memory: 0,
             polish: true,
             engine: EngineKind::Auto,
+            auto_admm_max_iter: 50,
+            ipm_max_iter: 40,
         }
     }
 }

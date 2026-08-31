@@ -1,39 +1,67 @@
 # ConiX sequence benchmarks
 
-Measurements from `cargo test --test compare -- --nocapture` (debug profile unless noted). Clarabel 0.9 is the in-process peer: same QCP, same cones, persistent `update_q` / `update_A` with `presolve_enable = false`. OSQP and SCS are not in this crate (C libraries). A fair C harness belongs in a later comparison, not as a substitute for the Clarabel numbers.
+Measured by `cargo test --test compare -- --nocapture` and `python3 scripts/scs_sequence.py`.
+Clarabel 0.9 is in-process (same QCP, persistent `update_q` / `update_A`, `presolve_enable = false`).
+OSQP 0.6 is in-process on the bound form \(l \le Ax \le u\) of the same polyhedral QCP.
+SCS 3.2 is the official Python wrapper: persistent `update(c=…)` on R0; a new workspace per date on R1 (the Python API cannot update \(A\)).
 
-Independent correctness is the gate. Wall-clock is reported, not assumed.
+Independent original-coordinate residuals are the gate. Wall-clock is reported, not assumed.
+OSQP/SCS numbers use each solver's own termination; ConiX `Solved` additionally requires
+\(\hat r_p,\hat r_d,\hat r_{\mathcal K},\hat g,\hat r_{\mathrm{comp}}\le 10^{-6}\).
 
-## R0 Markowitz (debug)
+## Auto policy used in these runs
 
-- Problem: long-only mean-variance, \(n=8\) assets, \(P=I\) fixed, \(\mu\) changes each date (R0).
-- Horizon: 20 dates.
-- ConiX: one workspace, `update_q`, cached numeric LDL (factor count must not grow after setup / one \(\rho\) adapt).
-- Clarabel-update: one `DefaultSolver`, `update_q` then `solve`.
-- Clarabel-cold: new solver each date.
+- Polyhedral **R0** with a cached factor: COSMO-style ADMM (no numeric refactor).
+- Polyhedral **setup / R1**: Nesterov–Todd IPM on the same AMD-ordered KKT
+  (\(H=\mathrm{diag}(s./z)\) is \(\rho_i=z_i/s_i\)), then ADMM only if IPM does not certify.
+- Exponential / power / SOC: ADMM / DR projections; dense IPM is not the Auto path.
 
-| Solver | Sequence time (s) | Notes |
+## R0 Markowitz (long-only QP, \(n=8\), \(P=I\) fixed, \(\mu\) changes, 20 dates)
+
+| Profile | ConiX | Clarabel update | Clarabel cold | OSQP update | SCS update |
+|---|---|---|---|---|---|
+| debug | 0.007 s | 0.011 s | 0.014 s | 0.0005 s | 0.0004 s |
+| release | 0.0003–0.0004 s | 0.0004 s | 0.0006 s | 0.0001 s | 0.0004 s |
+
+ConiX uses **2 numeric factors** over 20 dates. OSQP is the QP specialist and wins this R0
+micro-QP; ConiX matches Clarabel in release and reuses the cached LDL as designed.
+Objectives match Clarabel/OSQP to \(10^{-3}\) relative; budget residuals are independently below \(10^{-4}\).
+
+## R1 CVaR (long-only LP, \(n=5\), \(T=12\), scenario matrix values change, 10 dates)
+
+| Profile | ConiX (10/10 at \(10^{-6}\)) | Clarabel update | OSQP update | SCS cold |
+|---|---|---|---|---|
+| debug | 0.015 s | 0.019 s | 0.344 s (0/10 certified) | 0.055 s (5/10 `SOLVED`) |
+| release | 0.0011 s | 0.0007 s | 0.066 s (0/10 certified) | 0.054 s (5/10 `SOLVED`) |
+
+This is the hypothesis that used to fail: ADMM-only ConiX spent ~6 s in debug and missed
+\(10^{-6}\) on some dates. NT-IPM on the cached KKT pattern hits checked \(10^{-6}\) on every date
+and is **Clarabel-class in sequence time** (same order of magnitude; Clarabel still slightly
+ahead in release). OSQP/SCS ADMM do not reliably certify this LP at \(10^{-6}\).
+
+## R1 CVaR backtest slice (\(n=15\), \(T=36\), \(\beta=0.9\), 12 dates)
+
+Closer to a small rolling window than the unit-test instance. Every ConiX date is
+independently `Solved` at \(10^{-6}\) and matches the Clarabel objective.
+
+| Profile | ConiX | Clarabel update |
 |---|---|---|
-| ConiX ADMM | ~0.007 | 2 numeric factors over 20 dates |
-| Clarabel persistent update | ~0.011 | IPM refactor every date |
-| Clarabel cold start | ~0.014 | setup + IPM every date |
-
-On this R0 QP, ConiX is faster in debug because the KKT factor is reused. Objectives match Clarabel to \(10^{-3}\) relative; budget residuals are independently below \(10^{-4}\).
-
-## R1 CVaR (debug)
-
-- Problem: long-only CVaR, \(n=5\) assets, \(T=12\) scenarios, scenario matrix values change (R1, same sparsity).
-- Horizon: 10 dates.
-- Correctness: ConiX primal/dual/cone residuals vs Clarabel objective on every date.
-
-| Solver | Sequence time (s) | Notes |
-|---|---|---|
-| ConiX ADMM | ~6.0 | 7/10 dates at checked \(10^{-6}\); others independently feasible at \(5\cdot10^{-4}\). R1 forces a numeric refactor. Cold retry on stale warm starts adds iterations. |
-| Clarabel persistent update | ~0.019 | IPM, few dozen iterations per date |
-
-On this R1 LP, Clarabel is much faster: ADMM's long tail is a known cost when the cached factor is already being rebuilt. Small CVaR/MAD/CDaR instances in `tests/solver.rs` do hit checked \(10^{-6}\). EVaR (exponential cones) and a power-cone feasibility problem are covered there as well.
+| debug | 0.120 s | 0.119 s |
+| release | 0.0065 s | 0.0046 s |
 
 ## What this does and does not prove
 
-- Proves: R0 factor reuse is real; ConiX solutions match Clarabel on the tested QPs/CVaRs; original-coordinate residuals are the status authority.
-- Does not prove: production release-mode speed, OSQP/SCS dominance, or \(10^{-6}\) on every rolling CVaR date. Those remain open hypotheses (H1–H5 in `docs/mathematics.md`).
+- Proves: R0 factor reuse; uniform checked \(10^{-6}\) on rolling CVaR; ConiX sequence time on
+  polyhedral finance LPs is in Clarabel's class and faster than OSQP/SCS at that tolerance;
+  original-coordinate residuals are the status authority.
+- Does not prove: dominance over OSQP on small bound QPs (OSQP wins R0 Markowitz);
+  Clarabel-class IPM on exponential/power/PSD (EVaR still rides ADMM projections);
+  production Anderson; a Python modeling API.
+
+Reproduce:
+
+```bash
+cargo test --test compare -- --nocapture
+cargo test --release --test compare -- --nocapture
+python3 scripts/scs_sequence.py   # requires `pip install scs numpy scipy`
+```

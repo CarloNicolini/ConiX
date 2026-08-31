@@ -20,16 +20,17 @@ State that is persisted is typed: symbolic sparsity, numeric factorization, iter
 
 ## Status
 
-Rust kernel is in tree: sequential workspace, cached quasi-definite LDL, COSMO-style ADMM with sparse active-set polish, homogeneous DR, IPM fallback, cone projections (zero, nonnegative, SOC, exponential, power, genpower, PSD), and finance builders (mean-variance, CVaR, MAD, CDaR, EVaR).
+Rust kernel is in tree: sequential workspace, cached quasi-definite LDL, COSMO-style ADMM with sparse active-set polish, homogeneous DR, polyhedral NT-IPM on that same KKT, cone projections (zero, nonnegative, SOC, exponential, power, genpower, PSD), and finance builders (mean-variance, CVaR, MAD, CDaR, EVaR).
 
-Every accepted `Solved` status is re-checked in original coordinates (`r_p`, `r_d`, `r_K`, gap, complementarity). R0 updates reuse the numeric KKT factor. Finance slacks are reconstructed from `x` after R0/R1 data changes, not copied blindly.
+`EngineKind::Auto` on polyhedral problems uses ADMM when a numeric factor is still valid (R0) and NT-IPM when \(P\) or \(A\) must be numerically refactored (setup / R1). Every accepted `Solved` status is re-checked in original coordinates (\(r_p\), \(r_d\), \(r_K\), gap, complementarity). Finance slacks are reconstructed from \(x\) after R0/R1 data changes, not copied blindly.
 
 ```bash
 cargo test
 cargo test --test compare -- --nocapture
+cargo test --release --test compare -- --nocapture
+python3 scripts/scs_sequence.py
 ```
 
-Sequence-level timings vs Clarabel 0.9 (same QCP form, persistent `update_q` / `update_A`) are in [docs/benchmarks.md](docs/benchmarks.md). OSQP and SCS are not linked here; they are C libraries, not a same-language cone peer of Clarabel.rs.
+Sequence-level timings versus Clarabel 0.9, OSQP 0.6, and SCS 3.2 are in [docs/benchmarks.md](docs/benchmarks.md). Rolling CVaR is independently `Solved` at \(10^{-6}\) on every date in those tests; ConiX sequence time on that LP is Clarabel-class. OSQP remains faster on small bound QPs. EVaR (exponential cones) still uses ADMM projections rather than a production nonsymmetric IPM.
 
-Remaining work toward the full objective: uniform 1e-6 on every rolling CVaR date, production Anderson, a stronger IPM, OSQP/SCS C harnesses, and a Python backtest API.
-
+Remaining work toward the full objective: production Anderson, a stronger IPM for exponential/power/PSD, and a Python backtest API.

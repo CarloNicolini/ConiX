@@ -191,10 +191,39 @@ fn cdar_solves() {
     st.engine = EngineKind::Auto;
     st.adaptive_rho = true;
     st.max_iter = 8_000;
+    st.auto_admm_max_iter = 50;
     let sol = solve_once(qcp, st).unwrap();
     assert_eq!(sol.info.status, Status::Solved, "{:?}", sol.info);
-    assert!(sol.info.res_pri <= 1e-6 && sol.info.res_dual <= 1e-6, "{:?}", sol.info);
+    assert!(
+        sol.info.res_pri <= 1e-6 && sol.info.res_dual <= 1e-6,
+        "{:?}",
+        sol.info
+    );
     assert!((sol.x[0] + sol.x[1] - 1.0).abs() < 1e-4, "{:?}", sol.x);
+}
+
+#[test]
+fn ipm_solves_cvar() {
+    let returns = vec![
+        vec![0.01, 0.02],
+        vec![-0.03, 0.01],
+        vec![0.00, -0.02],
+        vec![0.02, 0.00],
+    ];
+    let qcp = models::cvar(&returns, 0.75, &[0.0, 0.0], &[1.0, 1.0]);
+    let mut st = Settings::default();
+    st.engine = EngineKind::Ipm;
+    let sol = solve_once(qcp, st).unwrap();
+    assert_eq!(sol.info.status, Status::Solved, "{:?}", sol.info);
+    assert!(sol.info.res_pri <= 1e-6, "{:?}", sol.info);
+    assert!(sol.info.res_dual <= 1e-6, "{:?}", sol.info);
+    assert!(sol.info.res_gap <= 1e-6, "{:?}", sol.info);
+    assert!(sol.info.res_comp <= 1e-6, "{:?}", sol.info);
+    assert!(
+        (sol.x[0] + sol.x[1] - 1.0).abs() < 1e-4,
+        "budget {:?}",
+        sol.x
+    );
 }
 
 #[test]
@@ -295,7 +324,11 @@ fn evar_solves() {
         "evar {:?}",
         sol.info
     );
-    assert!((sol.x[0] + sol.x[1] - 1.0).abs() < 5e-2, "budget {:?}", sol.x);
+    assert!(
+        (sol.x[0] + sol.x[1] - 1.0).abs() < 5e-2,
+        "budget {:?}",
+        sol.x
+    );
 }
 
 #[test]
@@ -306,18 +339,10 @@ fn power_cone_bound() {
     let a = CscMatrix::from_triplets(
         4,
         2,
-        &[
-            (0, 0, 1.0),
-            (0, 1, 1.0),
-            (1, 0, -1.0),
-            (2, 1, -1.0),
-        ],
+        &[(0, 0, 1.0), (0, 1, 1.0), (1, 0, -1.0), (2, 1, -1.0)],
     );
     let b = vec![2.0, 0.0, 0.0, 1.0];
-    let cones = CompositeCone::new(vec![
-        Cone::Zero { dim: 1 },
-        Cone::Power { alpha: 0.5 },
-    ]);
+    let cones = CompositeCone::new(vec![Cone::Zero { dim: 1 }, Cone::Power { alpha: 0.5 }]);
     let mut st = Settings::default();
     st.engine = EngineKind::Admm;
     st.max_iter = 8_000;

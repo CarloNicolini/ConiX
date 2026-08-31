@@ -92,9 +92,21 @@ impl KktSystem {
     }
 
     pub fn update_rho(&mut self, rho: &[f64]) -> Result<(), String> {
+        self.update_nt(self.sigma, rho)
+    }
+
+    /// Rewrite the quasi-definite diagonals in place: \(P+\sigma I\) and \(-1/\rho\).
+    /// Pattern, AMD order, and symbolic analysis stay valid (polyhedral NT-IPM).
+    pub fn update_nt(&mut self, sigma: f64, rho: &[f64]) -> Result<(), String> {
+        let ds = sigma - self.sigma;
+        if ds.abs() > 0.0 {
+            for j in 0..self.n {
+                self.k_upper.x[self.diag_map[j]] += ds;
+            }
+            self.sigma = sigma;
+        }
         for i in 0..self.m {
-            let val = -1.0 / rho[i];
-            self.k_upper.x[self.rho_map[i]] = val;
+            self.k_upper.x[self.rho_map[i]] = -1.0 / rho[i];
         }
         self.k_perm = self.k_upper.permute_sym_upper(&self.perm);
         self.refactor()
