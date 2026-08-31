@@ -12,7 +12,7 @@ One unmodified algorithm cannot simultaneously dominate broad cone coverage, hig
 
 1. **Cached homogeneous Douglas–Rachford** as the sequential fast path (factor reuse when \(P,A\) are fixed; true primal/dual/embedding warm starts).
 2. **Proximal ADMM** as a polyhedral/QP specialist (CVaR, MAD, CDaR, box-constrained Markowitz).
-3. **Homogeneous IPM** as the certifying high-accuracy fallback (Andersen–Ye \((\tau,\kappa)\) Newton on a sparse cone-block KKT; Clarabel \(H_s\) for exp/power/SOC; polyhedral NT as the diagonal special case). Symbolic AMD is reused on R1.
+3. **Homogeneous IPM** as the certifying high-accuracy fallback (Andersen–Ye \((\tau,\kappa)\) Newton on a sparse cone-block KKT; Nesterov–Todd \(H_s\) for SOC and PSD; Clarabel \(H_s\) for exp/power/genpower; polyhedral NT as the diagonal special case). Symbolic AMD is reused on R1.
 4. **Safeguarded Anderson / limited-memory Broyden** only on a fixed splitting map (disabled on tiny \(n+m\) maps where the extra saxpy is a net loss).
 5. **Independent residual and ray verification** in original coordinates.
 
@@ -20,7 +20,7 @@ State that is persisted is typed: symbolic sparsity, numeric factorization, iter
 
 ## Status
 
-Rust kernel is in tree: sequential workspace, cached quasi-definite LDL, COSMO-style ADMM with sparse active-set polish, homogeneous DR with safeguarded Anderson, homogeneous sparse-KKT IPM (Andersen–Ye \((\tau,\kappa)\), cone-block \(H_s\)), cone projections (zero, nonnegative, SOC, exponential, power, genpower, PSD), finance builders (mean-variance, CVaR, MAD, CDaR, EVaR), and a ctypes Python sequential API (`python/conix`).
+Rust kernel is in tree: sequential workspace, cached quasi-definite LDL, COSMO-style ADMM with sparse active-set polish, homogeneous DR with safeguarded Anderson, homogeneous sparse-KKT IPM (Andersen–Ye \((\tau,\kappa)\), cone-block \(H_s\), Nesterov–Todd on SOC/PSD), cone projections (zero, nonnegative, SOC, exponential, power, genpower, PSD), finance builders (mean-variance, CVaR, MAD, CDaR, EVaR), and a ctypes Python sequential API (`python/conix`).
 
 `EngineKind::Auto` on polyhedral problems uses ADMM when a numeric factor is still valid (R0) and the homogeneous NT-IPM when \(P\) or \(A\) must be numerically refactored (setup / R1). Non-polyhedral Auto (EVaR, exp, power, SOC) runs the barrier IPM first and keeps ADMM only if the independent checker prefers it. Every accepted `Solved` status is re-checked in original coordinates (\(r_p\), \(r_d\), \(r_K\), gap, complementarity). Finance slacks are reconstructed from \(x\) after R0/R1 data changes, not copied blindly. IPM infeasibility statuses are independently checked Farkas rays.
 

@@ -4,6 +4,8 @@ use crate::algebra::dot;
 
 mod nonsym;
 pub(crate) use nonsym::*;
+mod psd;
+pub(crate) use psd::*;
 
 #[derive(Clone, Debug)]
 pub enum Cone {
@@ -635,103 +637,6 @@ pub(crate) fn exp_backtrack(x: &[f64], d: &[f64], primal: bool) -> f64 {
     a
 }
 
-fn project_psd_triangle(x: &mut [f64], side: usize) {
-    let n = side;
-    let mut a = vec![0.0; n * n];
-    let mut k = 0;
-    for j in 0..n {
-        for i in 0..=j {
-            let v = if i == j {
-                x[k]
-            } else {
-                x[k] / std::f64::consts::SQRT_2
-            };
-            a[i * n + j] = v;
-            a[j * n + i] = v;
-            k += 1;
-        }
-    }
-    let (w, q) = jacobi_eig(n, &mut a);
-    // A+ = Q diag(max(w,0)) Q'
-    let mut ap = vec![0.0; n * n];
-    for i in 0..n {
-        for j in 0..n {
-            let mut s = 0.0;
-            for t in 0..n {
-                s += q[i * n + t] * w[t].max(0.0) * q[j * n + t];
-            }
-            ap[i * n + j] = s;
-        }
-    }
-    k = 0;
-    for j in 0..n {
-        for i in 0..=j {
-            x[k] = if i == j {
-                ap[i * n + j]
-            } else {
-                std::f64::consts::SQRT_2 * ap[i * n + j]
-            };
-            k += 1;
-        }
-    }
-}
-
-fn jacobi_eig(n: usize, a: &mut [f64]) -> (Vec<f64>, Vec<f64>) {
-    let mut q = vec![0.0; n * n];
-    for i in 0..n {
-        q[i * n + i] = 1.0;
-    }
-    for _ in 0..(8 * n * n).max(16) {
-        let mut maxv = 0.0;
-        let mut p = 0;
-        let mut r = 1;
-        for i in 0..n {
-            for j in (i + 1)..n {
-                let v = a[i * n + j].abs();
-                if v > maxv {
-                    maxv = v;
-                    p = i;
-                    r = j;
-                }
-            }
-        }
-        if maxv < 1e-14 {
-            break;
-        }
-        let app = a[p * n + p];
-        let arr = a[r * n + r];
-        let apr = a[p * n + r];
-        let tau = (arr - app) / (2.0 * apr);
-        let t = if tau >= 0.0 {
-            1.0 / (tau + (1.0 + tau * tau).sqrt())
-        } else {
-            -1.0 / (-tau + (1.0 + tau * tau).sqrt())
-        };
-        let c = 1.0 / (1.0 + t * t).sqrt();
-        let s = t * c;
-        for k in 0..n {
-            let akp = a[k * n + p];
-            let akr = a[k * n + r];
-            a[k * n + p] = c * akp - s * akr;
-            a[p * n + k] = a[k * n + p];
-            a[k * n + r] = s * akp + c * akr;
-            a[r * n + k] = a[k * n + r];
-        }
-        a[p * n + p] = c * c * app + s * s * arr - 2.0 * s * c * apr;
-        a[r * n + r] = s * s * app + c * c * arr + 2.0 * s * c * apr;
-        a[p * n + r] = 0.0;
-        a[r * n + p] = 0.0;
-        for k in 0..n {
-            let qkp = q[k * n + p];
-            let qkr = q[k * n + r];
-            q[k * n + p] = c * qkp - s * qkr;
-            q[k * n + r] = s * qkp + c * qkr;
-        }
-    }
-    let w: Vec<f64> = (0..n).map(|i| a[i * n + i]).collect();
-    (w, q)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -759,5 +664,17 @@ mod tests {
         assert!(h[0] > 0.0);
         let det2 = h[0] * h[4] - h[1] * h[1];
         assert!(det2 > 0.0);
+    }
+
+    #[test]
+    fn psd_triangle_projects() {
+        // Packed svec of [[-1, 2],[2, -1]]; eigenvalues 1 and -3 → project to rank-1 PSD.
+        let s2 = std::f64::consts::SQRT_2;
+        let mut x = [-1.0, s2 * 2.0, -1.0];
+        project_cone(&Cone::PsdTriangle { side: 2 }, &mut x);
+        let mut a = svec_to_mat(&x, 2);
+        let (w, _) = jacobi_eig(2, &mut a);
+        assert!(w.iter().all(|&lam| lam >= -1e-10), "{w:?}");
+        assert!(w.iter().any(|&lam| lam > 0.5), "{w:?}");
     }
 }

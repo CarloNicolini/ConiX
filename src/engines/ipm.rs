@@ -3,7 +3,7 @@
 //! Newton linearization of the Andersen–Ye \((\tau,\kappa)\) QCP embedding
 //! reduces to one factorization of the sparse cone-block KKT
 //! \(K=[P, A'; A, -H_s]\) and a 2×2 reduction for \(\Delta\tau\). Symmetric
-//! cones use Nesterov–Todd \(H_s\); exponential/power use Clarabel \(H_s\)
+//! cones use Nesterov–Todd \(H_s\) (SOC and PSD \(\mathrm{skron}\)); exponential/power use Clarabel \(H_s\)
 //! and \(\Delta s + H_s\Delta z = -(s+\sigma\mu\nabla f^\ast(z))\).
 //! Polyhedral NT is the diagonal special case \(H=\mathrm{diag}(s./z)\).
 //! AMD order and the symbolic factor persist across Newton steps and R1.
@@ -509,11 +509,20 @@ fn combined_c(ws: &Workspace, sigma: f64, mu: f64, ds_aff: &[f64], dz_aff: &[f64
                     c[off + k] += ds_aff[off + k] * dz_aff[off + k];
                 }
             }
-            _ => {
-                for k in 0..cone.dim() {
-                    let i = off + k;
-                    let zi = ws.z[i].abs().max(1e-16);
-                    c[i] += -sigu / zi + ds_aff[i] * dz_aff[i] / zi;
+            Cone::PsdTriangle { side } => {
+                let d = cone.dim();
+                if let Some(zinv) = crate::cones::psd_svec_inv(&ws.z[off..off + d], *side) {
+                    for k in 0..d {
+                        c[off + k] -= sigu * zinv[k];
+                    }
+                }
+                let jordan = crate::cones::psd_jordan(
+                    &ds_aff[off..off + d],
+                    &dz_aff[off..off + d],
+                    *side,
+                );
+                for k in 0..d {
+                    c[off + k] += jordan[k];
                 }
             }
         }
@@ -578,8 +587,13 @@ fn pack_hs(ws: &Workspace, packed: &mut [f64], mu: f64, primal_dual: bool) -> bo
                 po = pack_dense(packed, po, 3, &hs);
             }
             Cone::PsdTriangle { side } => {
-                let d = side * (side + 1) / 2;
-                po = pack_dense_diag(packed, po, d, mu.max(1e-8));
+                let d = cone.dim();
+                let Some(hs) =
+                    crate::cones::psd_nt_hessian(&ws.s[off..off + d], &ws.z[off..off + d], *side)
+                else {
+                    return false;
+                };
+                po = pack_dense(packed, po, d, &hs);
             }
         }
     }
@@ -645,11 +659,10 @@ fn unit_initialize(ws: &mut Workspace) {
                 ws.s[off..off + u.len()].copy_from_slice(&u);
                 ws.z[off..off + u.len()].copy_from_slice(&u);
             }
-            _ => {
-                for k in 0..cone.dim() {
-                    ws.s[off + k] = 1.0;
-                    ws.z[off + k] = 1.0;
-                }
+            Cone::PsdTriangle { side } => {
+                let u = crate::cones::psd_unit_svec(*side);
+                ws.s[off..off + u.len()].copy_from_slice(&u);
+                ws.z[off..off + u.len()].copy_from_slice(&u);
             }
         }
     }
@@ -719,13 +732,15 @@ fn max_step(ws: &Workspace, ds: &[f64]) -> f64 {
                     true,
                 ));
             }
-            _ => {
-                for k in 0..cone.dim() {
-                    if ds[off + k] < 0.0 && ws.s[off + k] > 0.0 {
-                        a = a.min(-ws.s[off + k] / ds[off + k]);
-                    }
-                }
+            Cone::PsdTriangle { side } => {
+                let d = cone.dim();
+                a = a.min(crate::cones::psd_max_step(
+                    &ws.s[off..off + d],
+                    &ds[off..off + d],
+                    *side,
+                ));
             }
+            Cone::Zero { .. } => {}
         }
     }
     a.clamp(0.0, 1.0)
@@ -785,7 +800,15 @@ fn max_step_dual(ws: &Workspace, dz: &[f64]) -> f64 {
                     false,
                 ));
             }
-            _ => {}
+            Cone::PsdTriangle { side } => {
+                let d = cone.dim();
+                a = a.min(crate::cones::psd_max_step(
+                    &ws.z[off..off + d],
+                    &dz[off..off + d],
+                    *side,
+                ));
+            }
+            Cone::Zero { .. } => {}
         }
     }
     a.clamp(0.0, 1.0)

@@ -519,3 +519,92 @@ fn ipm_kkt_cone_blocks_not_dense() {
     );
     assert_eq!(k.packed_len(), 3 + 6 + 6);
 }
+
+#[test]
+fn psd_ipm_interior() {
+    // min ½ t² − 2t  s.t. [[t,0],[0,t]] ⪰ I  → unconstrained t=2 is strictly feasible.
+    let p = CscMatrix::identity(1);
+    let q = vec![-2.0];
+    let a = CscMatrix::from_triplets(3, 1, &[(0, 0, -1.0), (2, 0, -1.0)]);
+    let b = vec![-1.0, 0.0, -1.0];
+    let cones = CompositeCone::new(vec![Cone::PsdTriangle { side: 2 }]);
+    let mut st = Settings::default();
+    st.engine = EngineKind::Ipm;
+    st.ipm_max_iter = 50;
+    let sol = solve_once(Qcp { p, q, a, b, cones }, st).unwrap();
+    assert_eq!(sol.info.status, Status::Solved, "psd interior {:?}", sol.info);
+    assert!(sol.info.res_pri <= 1e-6, "{:?}", sol.info);
+    assert!(sol.info.res_dual <= 1e-6, "{:?}", sol.info);
+    assert!(sol.info.res_gap <= 1e-6, "{:?}", sol.info);
+    assert!(sol.info.res_comp <= 1e-6, "{:?}", sol.info);
+    assert!(sol.info.res_cone <= 1e-6, "{:?}", sol.info);
+    assert!((sol.x[0] - 2.0).abs() < 1e-4, "{:?}", sol.x);
+}
+
+#[test]
+fn psd_ipm_schur() {
+    // min t s.t. x = 1 and [[1, x],[x, t]] ⪰ 0  → (x, t) = (1, 1).
+    let p = CscMatrix::zeros(2, 2);
+    let q = vec![0.0, 1.0];
+    let s2 = std::f64::consts::SQRT_2;
+    let a = CscMatrix::from_triplets(
+        4,
+        2,
+        &[(0, 0, 1.0), (2, 0, -s2), (3, 1, -1.0)],
+    );
+    let b = vec![1.0, 1.0, 0.0, 0.0];
+    let cones = CompositeCone::new(vec![
+        Cone::Zero { dim: 1 },
+        Cone::PsdTriangle { side: 2 },
+    ]);
+    let mut st = Settings::default();
+    st.engine = EngineKind::Ipm;
+    st.ipm_max_iter = 80;
+    let sol = solve_once(Qcp { p, q, a, b, cones }, st).unwrap();
+    assert_eq!(sol.info.status, Status::Solved, "psd schur {:?}", sol.info);
+    assert!(sol.info.res_pri <= 1e-5, "{:?}", sol.info);
+    assert!(sol.info.res_dual <= 1e-5, "{:?}", sol.info);
+    assert!(sol.info.res_cone <= 1e-5, "{:?}", sol.info);
+    assert!((sol.x[0] - 1.0).abs() < 1e-3, "{:?}", sol.x);
+    assert!((sol.x[1] - 1.0).abs() < 1e-3, "{:?}", sol.x);
+}
+
+#[test]
+fn sequential_psd_r0() {
+    let p = CscMatrix::identity(1);
+    let a = CscMatrix::from_triplets(3, 1, &[(0, 0, -1.0), (2, 0, -1.0)]);
+    let b = vec![-1.0, 0.0, -1.0];
+    let cones = CompositeCone::new(vec![Cone::PsdTriangle { side: 2 }]);
+    let mut st = Settings::default();
+    st.engine = EngineKind::Ipm;
+    st.ipm_max_iter = 50;
+    let mut ws = setup(
+        Qcp {
+            p,
+            q: vec![-2.0],
+            a,
+            b,
+            cones,
+        },
+        st,
+    )
+    .unwrap();
+    let s1 = solve(&mut ws);
+    assert_eq!(s1.info.status, Status::Solved, "{:?}", s1.info);
+    assert!((s1.x[0] - 2.0).abs() < 1e-4, "{:?}", s1.x);
+    ws.update_q(&[-3.0]).unwrap();
+    let s2 = solve(&mut ws);
+    assert_eq!(s2.info.status, Status::Solved, "{:?}", s2.info);
+    assert_eq!(s2.info.update_class, conix::UpdateClass::R0);
+    assert!((s2.x[0] - 3.0).abs() < 1e-4, "{:?}", s2.x);
+}
+
+#[test]
+fn ipm_kkt_psd_block() {
+    let p = CscMatrix::zeros(1, 1);
+    let a = CscMatrix::from_triplets(3, 1, &[(0, 0, -1.0), (2, 0, -1.0)]);
+    let cones = CompositeCone::new(vec![Cone::PsdTriangle { side: 2 }]);
+    let k = conix::ipm_kkt::IpmKkt::analyze(&p, &a, &cones).unwrap();
+    // svec dim 3 → packed upper triangle length 6.
+    assert_eq!(k.packed_len(), 6);
+}

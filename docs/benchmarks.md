@@ -13,7 +13,7 @@ OSQP/SCS numbers use each solver's own termination; ConiX `Solved` additionally 
 
 - Polyhedral **R0** with a cached factor: COSMO-style ADMM (no numeric refactor). Anderson is skipped on tiny \(n+m\) maps.
 - Polyhedral **setup / R1**: homogeneous NT-IPM on a sparse diagonal-\(H_s\) KKT (AMD reused across Newton steps), then ADMM only if IPM does not certify.
-- Exponential / power / SOC: homogeneous barrier IPM first (Andersen–Ye \((\tau,\kappa)\), sparse cone-block \(H_s\), Clarabel dual / primal-dual scaling, unit initialization, \(\sigma=(1-\alpha_{\mathrm{aff}})^3\)), ADMM only if the independent checker prefers it.
+- Exponential / power / SOC / PSD: homogeneous barrier IPM first (Andersen–Ye \((\tau,\kappa)\), sparse cone-block \(H_s\), Nesterov–Todd on SOC/PSD, Clarabel dual / primal-dual scaling on exp/power, unit initialization, \(\sigma=(1-\alpha_{\mathrm{aff}})^3\)), ADMM only if the independent checker prefers it.
 
 ## R0 Markowitz (long-only QP, \(n=8\), \(P=I\) fixed, \(\mu\) changes, 20 dates)
 
@@ -72,10 +72,12 @@ as a Farkas ray (`ipm_primal_infeasible_lp`).
   \(H_s\) so EVaR sequence time is Clarabel-class; polyhedral finance LPs match or beat
   Clarabel-update and beat OSQP/SCS at checked \(10^{-6}\); original-coordinate residuals
   are the status authority; the Python sequential API (`python/conix`) drives the same
-  workspace (CVaR R1, EVaR IPM).
-- Does not prove: dominance over OSQP on small bound QPs (OSQP still wins R0 Markowitz);
-  a production PSD Nesterov–Todd Hessian (PSD is projected; CVaR/MAD/EVaR/CDaR do not
-  require it). Generalized power uses Clarabel's dual Hessian as a dense triangle.
+  workspace (CVaR R1, EVaR IPM); PSD Nesterov–Todd \(H_s=\mathrm{skron}(G)\) (unit
+  \(\mathrm{svec}(I)\), interior eigenvalue steps) on a strictly feasible 2×2 SDP and a
+  Schur-complement SDP, including an R0 \(q\)-update.
+- Does not prove: dominance over OSQP on small bound QPs (OSQP still wins R0 Markowitz).
+  Generalized power uses Clarabel's dual Hessian as a dense triangle. CVaR/MAD/EVaR/CDaR
+  do not require PSD; the cone is present for Clarabel-class coverage and related SDP models.
 
 Reproduce:
 
