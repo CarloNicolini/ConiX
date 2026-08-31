@@ -59,6 +59,11 @@ impl KktSystem {
     }
 
     pub fn refactor(&mut self) -> Result<(), String> {
+        if let Some(fac) = self.fac.as_mut() {
+            return fac
+                .refactor_qd(&self.k_perm, self.n, 1e-14)
+                .map_err(|e| e.msg.to_string());
+        }
         let fac = LdlNumeric::factor_regularized(&self.k_perm, &self.sym, self.n, 1e-14)
             .or_else(|_| LdlNumeric::factor(&self.k_perm, &self.sym))
             .map_err(|e| e.msg.to_string())?;

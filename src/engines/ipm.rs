@@ -62,15 +62,22 @@ fn run_homog(ws: &mut Workspace) {
     let mut xi = vec![0.0; n];
     let mut hs_dz = vec![0.0; m];
     let mut ptmp = vec![0.0; n];
+    let mut xchk = vec![0.0; n];
+    let mut schk = vec![0.0; m];
+    let mut zchk = vec![0.0; m];
 
     while iter < max_iter {
         iter += 1;
         let (rtau, mu) =
             homog_residuals(ws, tau, kappa, &mut px, &mut atz, &mut ax, &mut rx, &mut rz);
 
-        if let Some(st) = homog_status(ws, tau, kappa, eps, eps_inf) {
-            status = st;
-            break;
+        if iter > 3 || kappa > 1e4 * tau {
+            if let Some(st) = homog_status(
+                ws, tau, kappa, eps, eps_inf, &rx, &rz, &mut xchk, &mut schk, &mut zchk,
+            ) {
+                status = st;
+                break;
+            }
         }
 
         if !pack_hs(ws, &mut packed, mu, primal_dual) {
@@ -305,53 +312,62 @@ fn homog_residuals(
     (rtau, mu.max(1e-16))
 }
 
-fn homog_status(ws: &Workspace, tau: f64, kappa: f64, eps: f64, eps_inf: f64) -> Option<Status> {
+fn homog_status(
+    ws: &Workspace,
+    tau: f64,
+    kappa: f64,
+    eps: f64,
+    eps_inf: f64,
+    rx: &[f64],
+    rz: &[f64],
+    x: &mut [f64],
+    s: &mut [f64],
+    z: &mut [f64],
+) -> Option<Status> {
     let ktr = kappa / tau.max(1e-16);
     if ktr <= 1.0 {
-        let inv = 1.0 / tau.max(1e-16);
-        let mut x = ws.x.clone();
-        let mut s = ws.s.clone();
-        let mut z = ws.z.clone();
-        for v in x.iter_mut() {
-            *v *= inv;
-        }
-        for v in s.iter_mut() {
-            *v *= inv;
-        }
-        for v in z.iter_mut() {
-            *v *= inv;
-        }
-        crate::scale::unscale_solution(&ws.eq, &mut x, &mut s, &mut z);
-        let r = crate::verifier::residuals(
-            &ws.orig.p,
-            &ws.orig.q,
-            &ws.orig.a,
-            &ws.orig.b,
-            &ws.orig.cones,
-            &x,
-            &s,
-            &z,
-        );
-        if crate::verifier::solved_at(&r, eps) {
-            return Some(Status::Solved);
+        let cheap = inf_norm(rx).max(inf_norm(rz));
+        let scale = tau.max(1e-16) * (1.0 + inf_norm(&ws.q).max(inf_norm(&ws.b)));
+        if cheap <= 32.0 * eps * scale {
+            let inv = 1.0 / tau.max(1e-16);
+            for i in 0..x.len() {
+                x[i] = ws.x[i] * inv;
+            }
+            for i in 0..s.len() {
+                s[i] = ws.s[i] * inv;
+            }
+            for i in 0..z.len() {
+                z[i] = ws.z[i] * inv;
+            }
+            crate::scale::unscale_solution(&ws.eq, x, s, z);
+            let r = crate::verifier::residuals(
+                &ws.orig.p,
+                &ws.orig.q,
+                &ws.orig.a,
+                &ws.orig.b,
+                &ws.orig.cones,
+                x,
+                s,
+                z,
+            );
+            if crate::verifier::solved_at(&r, eps) {
+                return Some(Status::Solved);
+            }
         }
     }
     if ktr > 1e4 {
         let inv = 1.0 / kappa.max(1e-16);
-        let mut x = ws.x.clone();
-        let mut s = ws.s.clone();
-        let mut z = ws.z.clone();
-        for v in x.iter_mut() {
-            *v *= inv;
+        for i in 0..x.len() {
+            x[i] = ws.x[i] * inv;
         }
-        for v in s.iter_mut() {
-            *v *= inv;
+        for i in 0..s.len() {
+            s[i] = ws.s[i] * inv;
         }
-        for v in z.iter_mut() {
-            *v *= inv;
+        for i in 0..z.len() {
+            z[i] = ws.z[i] * inv;
         }
-        crate::scale::unscale_solution(&ws.eq, &mut x, &mut s, &mut z);
-        if crate::verifier::check_primal_ray(&ws.orig.a, &ws.orig.b, &ws.orig.cones, &z, eps_inf) {
+        crate::scale::unscale_solution(&ws.eq, x, s, z);
+        if crate::verifier::check_primal_ray(&ws.orig.a, &ws.orig.b, &ws.orig.cones, z, eps_inf) {
             return Some(Status::PrimalInfeasible);
         }
         if crate::verifier::check_dual_ray(
@@ -359,7 +375,7 @@ fn homog_status(ws: &Workspace, tau: f64, kappa: f64, eps: f64, eps_inf: f64) ->
             &ws.orig.q,
             &ws.orig.a,
             &ws.orig.cones,
-            &x,
+            x,
             eps_inf,
         ) {
             return Some(Status::DualInfeasible);

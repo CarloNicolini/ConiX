@@ -22,6 +22,11 @@ pub struct LdlNumeric {
     pub lx: Vec<f64>,
     pub d: Vec<f64>,
     pub dinv: Vec<f64>,
+    y_markers: Vec<bool>,
+    y_vals: Vec<f64>,
+    y_idx: Vec<usize>,
+    elim: Vec<usize>,
+    l_next: Vec<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -80,98 +85,32 @@ impl LdlSymbolic {
 }
 
 impl LdlNumeric {
+    fn allocate(sym: LdlSymbolic) -> Self {
+        let n = sym.n;
+        let nnz_l = sym.lp[n];
+        Self {
+            sym,
+            li: vec![0; nnz_l],
+            lx: vec![0.0; nnz_l],
+            d: vec![0.0; n],
+            dinv: vec![0.0; n],
+            y_markers: vec![false; n],
+            y_vals: vec![0.0; n],
+            y_idx: vec![0; n],
+            elim: vec![0; n],
+            l_next: vec![0; n],
+        }
+    }
+
     pub fn factor_with_reg(
         a: &CscMatrix,
         sym: &LdlSymbolic,
         n_pos: Option<usize>,
         eps: f64,
     ) -> Result<Self, LdlError> {
-        let n = a.n;
-        let nnz_l = sym.lp[n];
-        let mut li = vec![0usize; nnz_l];
-        let mut lx = vec![0.0; nnz_l];
-        let mut d = vec![0.0; n];
-        let mut dinv = vec![0.0; n];
-        let mut y_markers = vec![false; n];
-        let mut y_vals = vec![0.0; n];
-        let mut y_idx = vec![0usize; n];
-        let mut elim = vec![0usize; n];
-        let mut l_next = vec![0usize; n];
-
-        for i in 0..n {
-            l_next[i] = sym.lp[i];
-        }
-
-        d[0] = a.x[a.col_ptr[0]];
-        d[0] = regularize_pivot(d[0], 0, n_pos, eps)?;
-        dinv[0] = 1.0 / d[0];
-
-        for k in 1..n {
-            let mut nnz_y = 0usize;
-            d[k] = 0.0;
-            for i in a.col_ptr[k]..a.col_ptr[k + 1] {
-                let bidx = a.row_idx[i];
-                if bidx == k {
-                    d[k] = a.x[i];
-                    continue;
-                }
-                y_vals[bidx] = a.x[i];
-                if !y_markers[bidx] {
-                    y_markers[bidx] = true;
-                    elim[0] = bidx;
-                    let mut nnz_e = 1usize;
-                    let mut next = if sym.etree[bidx] == UNKNOWN {
-                        None
-                    } else {
-                        Some(sym.etree[bidx] as usize)
-                    };
-                    while let Some(nx) = next {
-                        if nx >= k || y_markers[nx] {
-                            break;
-                        }
-                        y_markers[nx] = true;
-                        elim[nnz_e] = nx;
-                        nnz_e += 1;
-                        next = if sym.etree[nx] == UNKNOWN {
-                            None
-                        } else {
-                            Some(sym.etree[nx] as usize)
-                        };
-                    }
-                    while nnz_e > 0 {
-                        nnz_e -= 1;
-                        y_idx[nnz_y] = elim[nnz_e];
-                        nnz_y += 1;
-                    }
-                }
-            }
-
-            for ii in (0..nnz_y).rev() {
-                let cidx = y_idx[ii];
-                let tmp = l_next[cidx];
-                let yv = y_vals[cidx];
-                for j in sym.lp[cidx]..tmp {
-                    y_vals[li[j]] -= lx[j] * yv;
-                }
-                li[tmp] = k;
-                lx[tmp] = yv * dinv[cidx];
-                d[k] -= yv * lx[tmp];
-                l_next[cidx] += 1;
-                y_vals[cidx] = 0.0;
-                y_markers[cidx] = false;
-            }
-
-            d[k] = regularize_pivot(d[k], k, n_pos, eps)?;
-            dinv[k] = 1.0 / d[k];
-        }
-
-        Ok(Self {
-            sym: sym.clone(),
-            li,
-            lx,
-            d,
-            dinv,
-        })
+        let mut fac = Self::allocate(sym.clone());
+        fac.numeric(a, n_pos, eps)?;
+        Ok(fac)
     }
 
     pub fn factor(a: &CscMatrix, sym: &LdlSymbolic) -> Result<Self, LdlError> {
@@ -185,6 +124,100 @@ impl LdlNumeric {
         eps: f64,
     ) -> Result<Self, LdlError> {
         Self::factor_with_reg(a, sym, Some(n_pos), eps)
+    }
+
+    /// Recompute \(L\) and \(D\) in place. Pattern and symbolic analysis stay fixed.
+    pub fn refactor(
+        &mut self,
+        a: &CscMatrix,
+        n_pos: Option<usize>,
+        eps: f64,
+    ) -> Result<(), LdlError> {
+        self.numeric(a, n_pos, eps)
+    }
+
+    pub fn refactor_qd(&mut self, a: &CscMatrix, n_pos: usize, eps: f64) -> Result<(), LdlError> {
+        self.refactor(a, Some(n_pos), eps)
+            .or_else(|_| self.refactor(a, None, 0.0))
+    }
+
+    fn numeric(
+        &mut self,
+        a: &CscMatrix,
+        n_pos: Option<usize>,
+        eps: f64,
+    ) -> Result<(), LdlError> {
+        let n = self.sym.n;
+        debug_assert_eq!(a.n, n);
+        self.y_markers.fill(false);
+        self.y_vals.fill(0.0);
+        for i in 0..n {
+            self.l_next[i] = self.sym.lp[i];
+        }
+
+        self.d[0] = a.x[a.col_ptr[0]];
+        self.d[0] = regularize_pivot(self.d[0], 0, n_pos, eps)?;
+        self.dinv[0] = 1.0 / self.d[0];
+
+        for k in 1..n {
+            let mut nnz_y = 0usize;
+            self.d[k] = 0.0;
+            for i in a.col_ptr[k]..a.col_ptr[k + 1] {
+                let bidx = a.row_idx[i];
+                if bidx == k {
+                    self.d[k] = a.x[i];
+                    continue;
+                }
+                self.y_vals[bidx] = a.x[i];
+                if !self.y_markers[bidx] {
+                    self.y_markers[bidx] = true;
+                    self.elim[0] = bidx;
+                    let mut nnz_e = 1usize;
+                    let mut next = if self.sym.etree[bidx] == UNKNOWN {
+                        None
+                    } else {
+                        Some(self.sym.etree[bidx] as usize)
+                    };
+                    while let Some(nx) = next {
+                        if nx >= k || self.y_markers[nx] {
+                            break;
+                        }
+                        self.y_markers[nx] = true;
+                        self.elim[nnz_e] = nx;
+                        nnz_e += 1;
+                        next = if self.sym.etree[nx] == UNKNOWN {
+                            None
+                        } else {
+                            Some(self.sym.etree[nx] as usize)
+                        };
+                    }
+                    while nnz_e > 0 {
+                        nnz_e -= 1;
+                        self.y_idx[nnz_y] = self.elim[nnz_e];
+                        nnz_y += 1;
+                    }
+                }
+            }
+
+            for ii in (0..nnz_y).rev() {
+                let cidx = self.y_idx[ii];
+                let tmp = self.l_next[cidx];
+                let yv = self.y_vals[cidx];
+                for j in self.sym.lp[cidx]..tmp {
+                    self.y_vals[self.li[j]] -= self.lx[j] * yv;
+                }
+                self.li[tmp] = k;
+                self.lx[tmp] = yv * self.dinv[cidx];
+                self.d[k] -= yv * self.lx[tmp];
+                self.l_next[cidx] += 1;
+                self.y_vals[cidx] = 0.0;
+                self.y_markers[cidx] = false;
+            }
+
+            self.d[k] = regularize_pivot(self.d[k], k, n_pos, eps)?;
+            self.dinv[k] = 1.0 / self.d[k];
+        }
+        Ok(())
     }
 
     pub fn solve_in_place(&self, x: &mut [f64]) {
@@ -221,5 +254,36 @@ fn regularize_pivot(d: f64, _k: usize, n_pos: Option<usize>, eps: f64) -> Result
         Ok(if d >= 0.0 { floor } else { -floor })
     } else {
         Ok(d)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::algebra::CscMatrix;
+
+    #[test]
+    fn refactor_matches_fresh_factor() {
+        let a = CscMatrix::from_triplets(
+            3,
+            3,
+            &[(0, 0, 4.0), (0, 1, 1.0), (1, 1, 3.0), (1, 2, 0.5), (2, 2, 2.0)],
+        );
+        let sym = LdlSymbolic::analyze(&a).unwrap();
+        let mut fac = LdlNumeric::factor(&a, &sym).unwrap();
+        let d0 = fac.d.clone();
+        fac.refactor(&a, None, 0.0).unwrap();
+        for i in 0..3 {
+            assert!((fac.d[i] - d0[i]).abs() < 1e-12, "{:?} vs {d0:?}", fac.d);
+        }
+        let mut b = vec![1.0, 2.0, 3.0];
+        fac.solve_in_place(&mut b);
+        let mut b2 = vec![1.0, 2.0, 3.0];
+        LdlNumeric::factor(&a, &sym)
+            .unwrap()
+            .solve_in_place(&mut b2);
+        for i in 0..3 {
+            assert!((b[i] - b2[i]).abs() < 1e-10);
+        }
     }
 }

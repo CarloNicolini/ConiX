@@ -113,6 +113,11 @@ impl IpmKkt {
         } else {
             scatter_perm(&self.k_upper, &self.perm_map, &mut self.k_perm);
         }
+        if let Some(fac) = self.fac.as_mut() {
+            return fac
+                .refactor_qd(&self.k_perm, self.n, 1e-12)
+                .map_err(|e| e.msg.to_string());
+        }
         let fac = LdlNumeric::factor_regularized(&self.k_perm, &self.sym, self.n, 1e-12)
             .or_else(|_| LdlNumeric::factor(&self.k_perm, &self.sym))
             .map_err(|e| e.msg.to_string())?;

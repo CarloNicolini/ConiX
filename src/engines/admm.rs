@@ -103,6 +103,7 @@ pub fn run(ws: &mut Workspace) {
         && ws.cones.is_polyhedral()
         && status != Status::PrimalInfeasible
         && status != Status::DualInfeasible
+        && status != Status::Solved
     {
         sparse_polish(ws);
         let r = ws.original_residuals();
