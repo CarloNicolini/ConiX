@@ -81,6 +81,27 @@ def test_evar_checked():
         assert sol.residuals["dual"] <= 1e-6
 
 
+def test_mean_variance_sequence():
+    import conix as cx
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+    r1 = rng.standard_normal((8, 3)) * 0.02
+    r2 = rng.standard_normal((8, 3)) * 0.02
+    l = [0.0, 0.0, 0.0]
+    u = [1.0, 1.0, 1.0]
+    sigma1 = np.cov(r1, rowvar=False)
+    mu1 = r1.mean(axis=0)
+    with cx.mean_variance(sigma1, mu1, l, u, 1.0) as ws:
+        s1 = ws.solve()
+        assert s1.status == "Solved"
+        sigma2 = np.cov(r2, rowvar=False)
+        mu2 = r2.mean(axis=0)
+        ws.update_mean_variance(sigma2, mu2, l, u, 1.0)
+        s2 = ws.solve()
+        assert s2.status == "Solved"
+
+
 if __name__ == "__main__":
     if not _have_lib():
         raise SystemExit("libconix not found; cargo build --release and set CONIX_LIB")
