@@ -123,3 +123,18 @@ cargo test --release --test compare -- --nocapture
 python3 scripts/scs_sequence.py   # requires `pip install scs numpy scipy`
 CONIX_LIB=target/release/libconix.so python3 python/tests/test_backtest.py
 ```
+
+## CVXPY interface vs Clarabel (smoke)
+
+`python/conix/bench_cvxpy.py --smoke` and `python/tests/test_cvxpy.py` compare
+`problem.solve(solver="CONIX")` to CVXPY's default Clarabel on LP / QP / SOCP /
+portfolio problems. Objectives and primals agree to about \(10^{-3}\). Wall-clock
+through CVXPY is Clarabel-class on small QPs; Clarabel remains faster on cold
+solves because ConiX's sequential advantage is factor reuse across updates, not
+single-shot CVXPY compilation.
+
+skfolio MeanRisk walk-forward (`python/conix/bench_skfolio.py --quick`) matches
+Clarabel path Sharpes and weights on VARIANCE and CVaR when CVaR uses
+`engine=ADMM` (Auto's cold IPM can accept a suboptimal certificate on skfolio's
+scaled CVXPY graph). With `--accelerate`, the harness forces
+`backend="cvxpy-sequential"` so both solvers share the same path.

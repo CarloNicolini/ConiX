@@ -2,3 +2,9 @@ numpy
 scipy
 clarabel
 osqp
+cvxpy>=1.5
+pytest
+# Optional for the skfolio-accelerate walk-forward harness:
+# skfolio
+# skfolio-accelerate  (pip install -e ../skfolio-accelerate)
+

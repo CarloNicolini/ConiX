@@ -489,3 +489,34 @@ def cdar(
     lb, _ = _dptr(l)
     ub, _ = _dptr(u)
     return Workspace(lib().conix_cdar(t, n, r, float(beta), lb, ub, int(engine)))
+
+
+# General QCP + CVXPY (optional) exports.
+from .solver import ConixSolver, SolverSolution, solve  # noqa: E402
+
+try:
+    from .cvxpy_interface import CONIX, register
+except Exception:  # cvxpy is optional
+    CONIX = None
+
+    def register():
+        raise ImportError("cvxpy is required to register CONIX")
+
+__all__ = [
+    "AUTO",
+    "ADMM",
+    "SPLITTING",
+    "IPM",
+    "Workspace",
+    "Solution",
+    "ConixSolver",
+    "SolverSolution",
+    "solve",
+    "CONIX",
+    "register",
+    "cvar",
+    "evar",
+    "mad",
+    "cdar",
+    "mean_variance",
+]

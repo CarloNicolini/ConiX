@@ -33,4 +33,41 @@ python3 scripts/scs_sequence.py
 CONIX_LIB=target/release/libconix.so python3 -c "import sys; sys.path.insert(0,'python'); import conix"
 ```
 
+## CVXPY interface
+
+ConiX registers as a CVXPY conic solver (same Clarabel form \(Ax + s = b\), \(s \in \mathcal K\)), adapted from the COSMO.rs Python API:
+
+```python
+import sys
+sys.path.insert(0, "python")
+from conix.cvxpy_interface import register
+register()
+
+import cvxpy as cp
+x = cp.Variable(2)
+prob = cp.Problem(cp.Minimize(cp.sum_squares(x)), [x >= 0, cp.sum(x) == 1])
+prob.solve(solver="CONIX")
+```
+
+Correctness / speed vs Clarabel:
+
+```bash
+cargo build --release
+CONIX_LIB=target/release/libconix.so PYTHONPATH=python \
+  python python/conix/bench_cvxpy.py --smoke
+pytest python/tests/test_cvxpy.py -q
+```
+
+skfolio / [skfolio-accelerate](https://github.com/CarloNicolini/skfolio-accelerate) MeanRisk walk-forward (forces the CVXPY path so ConiX and Clarabel are compared head-to-head; with `--accelerate`, uses `backend="cvxpy-sequential"`):
+
+```bash
+pip install skfolio  # and optionally: pip install -e /path/to/skfolio-accelerate
+CONIX_LIB=target/release/libconix.so PYTHONPATH=python \
+  python python/conix/bench_skfolio.py --quick
+CONIX_LIB=target/release/libconix.so PYTHONPATH=python \
+  python python/conix/bench_skfolio.py --quick --accelerate
+```
+
+`register()` also refreshes skfolio's import-time `INSTALLED_SOLVERS` snapshot so `MeanRisk(solver="CONIX")` works even if skfolio was imported first.
+
 Sequence-level timings versus Clarabel 0.9, OSQP 0.6, and SCS 3.2 are in [docs/benchmarks.md](docs/benchmarks.md). Rolling CVaR is independently `Solved` at \(10^{-6}\) on every date in those tests. Non-degenerate EVaR (exponential cones) is independently `Solved` at \(10^{-6}\) by the barrier IPM and matches Clarabel's objective. OSQP remains faster on small bound QPs.
