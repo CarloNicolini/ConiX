@@ -1,0 +1,27 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "conix"
+requires-python = ">=3.9"
+dynamic = ["version"]
+description = "Sequential conic optimizer with a native Rust core and CVXPY interface"
+dependencies = [
+    "numpy",
+    "scipy",
+]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+]
+
+[project.optional-dependencies]
+cvxpy = ["cvxpy>=1.5"]
+test = ["cvxpy>=1.5", "pytest", "numpy", "scipy"]
+bench = ["cvxpy>=1.5", "clarabel", "skfolio"]
+
+[tool.maturin]
+features = ["python"]
+python-source = "python"
+module-name = "conix._conix"

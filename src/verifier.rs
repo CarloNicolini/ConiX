@@ -1,6 +1,6 @@
 //! Independent KKT residual and ray checks in original coordinates.
 
-use crate::algebra::{dot, inf_norm, CscMatrix};
+use crate::algebra::{dot, inf_norm, CscMatrix, CscExt};
 use crate::cones::CompositeCone;
 use crate::status::Status;
 

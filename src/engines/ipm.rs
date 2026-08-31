@@ -8,7 +8,7 @@
 //! Polyhedral NT is the diagonal special case \(H=\mathrm{diag}(s./z)\).
 //! AMD order and the symbolic factor persist across Newton steps and R1.
 
-use crate::algebra::{dot, inf_norm, CscMatrix};
+use crate::algebra::{dot, inf_norm, CscMatrix, CscExt};
 use crate::cones::Cone;
 use crate::ipm_kkt::IpmKkt;
 use crate::status::Status;

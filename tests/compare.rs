@@ -1,4 +1,4 @@
-//! Correctness and sequence-level timing versus Clarabel 0.9 and OSQP 0.6.
+//! Correctness and sequence-level timing versus Clarabel 0.11 and OSQP 0.6.
 //!
 //! Fair sequential comparison is ConiX workspace reuse vs persistent
 //! `update_q`/`update_A` on Clarabel and OSQP. SCS is a C library without a
@@ -9,7 +9,7 @@
 
 use clarabel::algebra::CscMatrix as ClarCsc;
 use clarabel::solver::*;
-use conix::algebra::CscMatrix;
+use conix::algebra::{CscExt, CscMatrix};
 use conix::models;
 use conix::settings::{EngineKind, Settings};
 use conix::{setup, solve, solve_once, Qcp, Status};
@@ -17,7 +17,8 @@ use std::borrow::Cow;
 use std::time::Instant;
 
 fn to_clarabel(a: &CscMatrix) -> ClarCsc<f64> {
-    ClarCsc::new(a.m, a.n, a.col_ptr.clone(), a.row_idx.clone(), a.x.clone())
+    // ConiX CSC is Clarabel's CscMatrix<f64>.
+    a.clone()
 }
 
 fn cones_clarabel(q: &Qcp) -> Vec<SupportedConeT<f64>> {
@@ -53,7 +54,7 @@ fn solve_clarabel(q: &Qcp) -> (Vec<f64>, f64, SolverStatus) {
     let A = to_clarabel(&q.a);
     let cones = cones_clarabel(q);
     let settings = clarabel_settings();
-    let mut solver = DefaultSolver::new(&P, &q.q, &A, &q.b, &cones, settings);
+    let mut solver = DefaultSolver::new(&P, &q.q, &A, &q.b, &cones, settings).unwrap();
     solver.solve();
     (
         solver.solution.x.clone(),
@@ -219,7 +220,7 @@ fn sequence_r1_evar_vs_clarabel() {
     let P = to_clarabel(&q0.p.upper_triangle());
     let A = to_clarabel(&q0.a);
     let cones = cones_clarabel(&q0);
-    let mut clar = DefaultSolver::new(&P, &q0.q, &A, &q0.b, &cones, clarabel_settings());
+    let mut clar = DefaultSolver::new(&P, &q0.q, &A, &q0.b, &cones, clarabel_settings()).unwrap();
 
     let mut t_conix = 0.0_f64;
     let mut t_clar = 0.0_f64;
@@ -294,7 +295,7 @@ fn sequence_r0_markowitz_vs_clarabel() {
     let P = to_clarabel(&q0.p.upper_triangle());
     let A = to_clarabel(&q0.a);
     let cones = cones_clarabel(&q0);
-    let mut clar = DefaultSolver::new(&P, &q0.q, &A, &q0.b, &cones, clarabel_settings());
+    let mut clar = DefaultSolver::new(&P, &q0.q, &A, &q0.b, &cones, clarabel_settings()).unwrap();
 
     let mut t_conix = 0.0_f64;
     let mut t_clar_upd = 0.0_f64;
@@ -375,7 +376,7 @@ fn sequence_r1_cvar_vs_clarabel() {
     let P = to_clarabel(&q0.p.upper_triangle());
     let A = to_clarabel(&q0.a);
     let cones = cones_clarabel(&q0);
-    let mut clar = DefaultSolver::new(&P, &q0.q, &A, &q0.b, &cones, clarabel_settings());
+    let mut clar = DefaultSolver::new(&P, &q0.q, &A, &q0.b, &cones, clarabel_settings()).unwrap();
 
     let mut t_conix = 0.0_f64;
     let mut t_clar_upd = 0.0_f64;
@@ -452,9 +453,9 @@ fn to_osqp(a: &CscMatrix) -> osqp::CscMatrix<'static> {
     osqp::CscMatrix {
         nrows: a.m,
         ncols: a.n,
-        indptr: Cow::Owned(a.col_ptr.clone()),
-        indices: Cow::Owned(a.row_idx.clone()),
-        data: Cow::Owned(a.x.clone()),
+        indptr: Cow::Owned(a.colptr.clone()),
+        indices: Cow::Owned(a.rowval.clone()),
+        data: Cow::Owned(a.nzval.clone()),
     }
 }
 
@@ -695,7 +696,7 @@ fn sequence_r1_cvar_backtest_vs_clarabel() {
     let P = to_clarabel(&q0.p.upper_triangle());
     let A = to_clarabel(&q0.a);
     let cones = cones_clarabel(&q0);
-    let mut clar = DefaultSolver::new(&P, &q0.q, &A, &q0.b, &cones, clarabel_settings());
+    let mut clar = DefaultSolver::new(&P, &q0.q, &A, &q0.b, &cones, clarabel_settings()).unwrap();
 
     let mut t_conix = 0.0_f64;
     let mut t_clar = 0.0_f64;
@@ -775,7 +776,7 @@ fn sequence_r1_mad_vs_clarabel() {
     let P = to_clarabel(&q0.p.upper_triangle());
     let A = to_clarabel(&q0.a);
     let cones = cones_clarabel(&q0);
-    let mut clar = DefaultSolver::new(&P, &q0.q, &A, &q0.b, &cones, clarabel_settings());
+    let mut clar = DefaultSolver::new(&P, &q0.q, &A, &q0.b, &cones, clarabel_settings()).unwrap();
 
     let mut t_conix = 0.0_f64;
     let mut t_clar = 0.0_f64;
@@ -845,7 +846,7 @@ fn sequence_r1_cdar_vs_clarabel() {
     let P = to_clarabel(&q0.p.upper_triangle());
     let A = to_clarabel(&q0.a);
     let cones = cones_clarabel(&q0);
-    let mut clar = DefaultSolver::new(&P, &q0.q, &A, &q0.b, &cones, clarabel_settings());
+    let mut clar = DefaultSolver::new(&P, &q0.q, &A, &q0.b, &cones, clarabel_settings()).unwrap();
 
     let mut t_conix = 0.0_f64;
     let mut t_clar = 0.0_f64;
@@ -915,7 +916,7 @@ fn sequence_r1_cvar_wide_vs_clarabel() {
     let P = to_clarabel(&q0.p.upper_triangle());
     let A = to_clarabel(&q0.a);
     let cones = cones_clarabel(&q0);
-    let mut clar = DefaultSolver::new(&P, &q0.q, &A, &q0.b, &cones, clarabel_settings());
+    let mut clar = DefaultSolver::new(&P, &q0.q, &A, &q0.b, &cones, clarabel_settings()).unwrap();
 
     let mut t_conix = 0.0_f64;
     let mut t_clar = 0.0_f64;
@@ -982,3 +983,5 @@ fn sequence_vs_scs_python() {
         "unexpected SCS harness output: {stdout}"
     );
 }
+
+

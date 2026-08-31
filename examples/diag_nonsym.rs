@@ -1,4 +1,5 @@
 //! One-off residual dump for exponential-cone programs. Not part of the test gate.
+use conix::algebra::CscExt;
 use conix::models;
 use conix::settings::{EngineKind, Settings};
 use conix::solve_once;
@@ -51,7 +52,7 @@ fn main() {
     }
 
     let qcp = Qcp {
-        p: CscMatrix::zeros(1, 1),
+        p: CscMatrix::zeros((1, 1)),
         q: vec![1.0],
         a: CscMatrix::from_triplets(3, 1, &[(2, 0, -1.0)]),
         b: vec![1.0, 1.0, 0.0],

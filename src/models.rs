@@ -1,6 +1,6 @@
 //! Canonical finance QCP builders. Auxiliaries are reconstructed from `x`.
 
-use crate::algebra::CscMatrix;
+use crate::algebra::{CscExt, CscMatrix};
 use crate::cones::{CompositeCone, Cone};
 use crate::workspace::Qcp;
 
@@ -8,7 +8,7 @@ use crate::workspace::Qcp;
 pub fn mean_variance(sigma: &CscMatrix, mu: &[f64], l: &[f64], u: &[f64], lambda: f64) -> Qcp {
     let n = mu.len();
     let mut p = sigma.clone();
-    for v in p.x.iter_mut() {
+    for v in p.nzval.iter_mut() {
         *v *= lambda;
     }
     let q: Vec<f64> = mu.iter().map(|v| -v).collect();
@@ -45,7 +45,7 @@ pub fn cvar(returns: &[Vec<f64>], beta: f64, l: &[f64], u: &[f64]) -> Qcp {
     let t = returns.len();
     let n = l.len();
     let nv = n + 1 + t; // x, η, z
-    let p = CscMatrix::zeros(nv, nv);
+    let p = CscMatrix::zeros((nv, nv));
     let tail = 1.0 / ((1.0 - beta) * t as f64);
     let mut q = vec![0.0; nv];
     q[n] = 1.0;
@@ -102,7 +102,7 @@ pub fn mad(returns: &[Vec<f64>], probs: &[f64], l: &[f64], u: &[f64]) -> Qcp {
     let t = returns.len();
     let n = l.len();
     let nv = n + t;
-    let p = CscMatrix::zeros(nv, nv);
+    let p = CscMatrix::zeros((nv, nv));
     let mut q = vec![0.0; nv];
     for s in 0..t {
         q[n + s] = probs[s];
@@ -161,7 +161,7 @@ pub fn cdar(path_returns: &[Vec<f64>], beta: f64, l: &[f64], u: &[f64]) -> Qcp {
     let n = l.len();
     // x (n), h (t), η (1), z (t)
     let nv = n + t + 1 + t;
-    let p = CscMatrix::zeros(nv, nv);
+    let p = CscMatrix::zeros((nv, nv));
     let tail = 1.0 / ((1.0 - beta) * t as f64);
     let mut q = vec![0.0; nv];
     q[n + t] = 1.0;
@@ -246,7 +246,7 @@ pub fn evar(returns: &[Vec<f64>], probs: &[f64], beta: f64, l: &[f64], u: &[f64]
     let n = l.len();
     // x, z_var, t_persp, u[T]
     let nv = n + 2 + t;
-    let p = CscMatrix::zeros(nv, nv);
+    let p = CscMatrix::zeros((nv, nv));
     let mut q = vec![0.0; nv];
     q[n] = 1.0; // z
     q[n + 1] = -(1.0 - beta).ln(); // -t log(1-β)

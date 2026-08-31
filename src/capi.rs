@@ -6,7 +6,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 use std::slice;
 
-use crate::algebra::CscMatrix;
+use crate::algebra::{CscExt, CscMatrix};
 use crate::cones::{CompositeCone, Cone};
 use crate::models;
 use crate::settings::{EngineKind, Settings};
@@ -356,7 +356,7 @@ fn apply_qcp(ws: &mut Workspace, q: &Qcp) -> Result<(), String> {
     if !q.a.same_pattern(&ws.orig.a) || !q.p.same_pattern(&ws.orig.p) {
         return Err("pattern change is R2; construct a new workspace".into());
     }
-    if q.p.x != ws.orig.p.x {
+    if q.p.nzval != ws.orig.p.nzval {
         ws.update_p(&q.p)?;
     }
     ws.update_a(&q.a)?;

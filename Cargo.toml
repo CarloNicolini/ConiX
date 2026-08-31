@@ -6,13 +6,29 @@ license = "Apache-2.0"
 description = "Sequential conic optimizer for rolling convex programs"
 repository = "https://github.com/CarloNicolini/ConiX"
 readme = "README.md"
+rust-version = "1.70"
+keywords = ["convex", "optimization", "conic", "sequential", "solver"]
+categories = ["mathematics"]
+resolver = "2"
 
 [lib]
 name = "conix"
 path = "src/lib.rs"
-crate-type = ["rlib", "cdylib"]
+crate-type = ["lib", "cdylib"]
 
 [dependencies]
+clarabel = "0.11"
+thiserror = "1.0"
+num-traits = "0.2"
+
+[dependencies.pyo3]
+optional = true
+version = "0.25"
+features = ["extension-module", "abi3-py39"]
+
+[features]
+default = []
+python = ["dep:pyo3"]
 
 [profile.release]
 lto = "thin"
@@ -20,5 +36,9 @@ codegen-units = 1
 opt-level = 3
 
 [dev-dependencies]
-clarabel = "0.9"
+clarabel = "0.11"
 osqp = "0.6.2"
+
+[[example]]
+name = "diag_nonsym"
+path = "examples/diag_nonsym.rs"
