@@ -15,6 +15,8 @@ pub struct Settings {
     pub iterative_refinement: usize,
     pub scaling_iter: usize,
     pub verbose: bool,
+    /// Type-I Anderson memory on the ADMM/DR map. `0` disables. Safeguard:
+    /// accept the candidate only if it shortens the last residual.
     pub anderson_memory: usize,
     pub polish: bool,
     pub engine: EngineKind,
@@ -51,11 +53,11 @@ impl Default for Settings {
             iterative_refinement: 1,
             scaling_iter: 10,
             verbose: false,
-            anderson_memory: 0,
+            anderson_memory: 5,
             polish: true,
             engine: EngineKind::Auto,
             auto_admm_max_iter: 50,
-            ipm_max_iter: 40,
+            ipm_max_iter: 80,
         }
     }
 }

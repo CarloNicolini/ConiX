@@ -214,7 +214,13 @@ Use Clarabel’s quadratic homogeneous embedding. Linearization reduces every Ne
 \begin{bmatrix} P & A^\top \\ A & -H \end{bmatrix}
 \]
 
-and three triangular solves (affine predictor, centering/corrector, combined). Symmetric cones use Nesterov–Todd scaling. On **polyhedral** cones the NT Hessian is diagonal, \(H=\mathrm{diag}(s./z)\), which is the ADMM KKT of §3.1 with \(\rho_i=z_i/s_i\). ConiX therefore runs the polyhedral IPM by rewriting only those diagonals on the cached AMD-ordered factor; \(\sigma\) and \(\rho\) are restored afterwards so a later R0 ADMM step still matches the sequential contract. Nonsymmetric cones use a barrier Hessian plus a *derived* primal-dual scaling (Clarabel’s low-rank BFGS-type map, or Dahl–Andersen third-order exponential-cone corrections). NT scaling is **not** used on exponential or power cones.
+and three triangular solves (affine predictor, centering/corrector, combined). Symmetric cones use Nesterov–Todd scaling. On **polyhedral** cones the NT Hessian is diagonal, \(H=\mathrm{diag}(s./z)\), which is the ADMM KKT of §3.1 with \(\rho_i=z_i/s_i\). ConiX therefore runs the polyhedral IPM by rewriting only those diagonals on the cached AMD-ordered factor; \(\sigma\) and \(\rho\) are restored afterwards so a later R0 ADMM step still matches the sequential contract. Nonsymmetric cones use Clarabel’s dual-barrier Hessian \(\nabla^2 f^\ast(z)\) (and the derived primal-dual \(H_s\) when the step is large enough), unit initialization, and the linearized centrality
+
+\[
+\Delta s + H_s\Delta z = -\bigl(s + \sigma\mu\nabla f^\ast(z)\bigr),\qquad \sigma=(1-\alpha_{\mathrm{aff}})^3.
+\]
+
+NT scaling is **not** used on exponential or power cones. The dense IPM path is a primal-dual Newton method on \((x,s,z)\); the Andersen–Ye \((\tau,\kappa)\) embedding is the homogeneous DR engine, not this Newton loop. Infeasible exponential programs are therefore certified by Engine S (or rejected by the independent ray checker), not by an IPM Farkas embedding.
 
 **Hot start, not a copied optimum.** Keep two points from a previous IPM solve: the last strictly interior iterate at barrier parameter \(\mu_{\mathrm{anchor}}>0\), and the accepted solution. For a new \(\theta_t\),
 

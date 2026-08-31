@@ -236,9 +236,11 @@ pub fn cdar(path_returns: &[Vec<f64>], beta: f64, l: &[f64], u: &[f64]) -> Qcp {
     Qcp { p, q, a, b, cones }
 }
 
-/// EVaR with one exponential cone per scenario.
+/// EVaR with one exponential cone per scenario (Ahmadi-Javid).
 ///
-/// `min z - t log(1-β)` s.t. `Σ p_s u_s ≤ t`, `(u_s, t, ℓ_s(x)-z) ∈ EXP`.
+/// `min z - t log(1-β)` s.t. `Σ p_s u_s ≤ t` and
+/// `(ℓ_s(x)-z, t, u_s) ∈ EXP`, i.e. `t exp((ℓ_s-z)/t) ≤ u_s`.
+/// Together these are `E[exp((ℓ-z)/t)] ≤ 1`.
 pub fn evar(returns: &[Vec<f64>], probs: &[f64], beta: f64, l: &[f64], u: &[f64]) -> Qcp {
     let t = returns.len();
     let n = l.len();
@@ -280,23 +282,21 @@ pub fn evar(returns: &[Vec<f64>], probs: &[f64], beta: f64, l: &[f64], u: &[f64]
     b.push(0.0);
     cones.push(Cone::Nonnegative { dim: 1 });
     row += 1;
-    // EXP: (u_s, t, -r_s'x - z)  written as Ax + s = b, s ∈ EXP
-    // s0 = u_s, so A row0: -e_{u_s}, b=0 → s0 + (-u_s) = 0
-    // s1 = t, A row1: -e_t
-    // s2 = -r'x - z, A row2: r'x + z  = s2?   Ax + s = b
-    // want s = (u, t, -r'x - z)
-    // row0: -u + s0 = 0
-    // row1: -t + s1 = 0
-    // row2: r'x + z + s2 = 0  → s2 = -r'x - z
+    // EXP: (ℓ_s - z, t, u_s) with ℓ_s = -r_s'x, i.e. y exp(x/y) ≤ z on (x,y,z).
+    // Then t exp((ℓ-z)/t) ≤ u and Σ p u ≤ t  ⇒  E[exp((ℓ-z)/t)] ≤ 1.
+    // Ax + s = b:
+    //   s0 = ℓ - z = -r'x - z  →  r'x + z + s0 = 0
+    //   s1 = t                 →  -t + s1 = 0
+    //   s2 = u                 →  -u + s2 = 0
     for s in 0..t {
-        trips.push((row, u0 + s, -1.0));
+        for j in 0..n {
+            trips.push((row, j, returns[s][j]));
+        }
+        trips.push((row, zvar, 1.0));
         b.push(0.0);
         trips.push((row + 1, tper, -1.0));
         b.push(0.0);
-        for j in 0..n {
-            trips.push((row + 2, j, returns[s][j]));
-        }
-        trips.push((row + 2, zvar, 1.0));
+        trips.push((row + 2, u0 + s, -1.0));
         b.push(0.0);
         cones.push(Cone::Exponential);
         row += 3;

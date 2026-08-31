@@ -146,6 +146,125 @@ fn clarabel_matches_cvar() {
 }
 
 #[test]
+fn clarabel_matches_evar() {
+    let r = vec![
+        vec![0.01, 0.00],
+        vec![-0.02, 0.01],
+        vec![0.00, 0.02],
+        vec![0.01, -0.01],
+        vec![-0.03, 0.02],
+        vec![0.02, -0.02],
+        vec![0.00, 0.01],
+        vec![-0.01, 0.00],
+        vec![0.015, -0.01],
+        vec![-0.005, 0.02],
+    ];
+    let p = vec![0.1; 10];
+    let qcp = models::evar(&r, &p, 0.8, &[0.0, 0.0], &[1.0, 1.0]);
+    let mut st = Settings::default();
+    st.engine = EngineKind::Ipm;
+    st.ipm_max_iter = 80;
+    let ours = solve_once(
+        Qcp {
+            p: qcp.p.clone(),
+            q: qcp.q.clone(),
+            a: qcp.a.clone(),
+            b: qcp.b.clone(),
+            cones: qcp.cones.clone(),
+        },
+        st,
+    )
+    .unwrap();
+    let (cx, cobj, cstat) = solve_clarabel(&qcp);
+    assert_eq!(cstat, SolverStatus::Solved, "clarabel {cstat:?}");
+    assert_eq!(ours.info.status, Status::Solved, "{:?}", ours.info);
+    let bgt_c: f64 = cx[..2].iter().sum();
+    let bgt_o: f64 = ours.x[..2].iter().sum();
+    assert!((bgt_c - 1.0).abs() < 1e-6);
+    assert!((bgt_o - 1.0).abs() < 1e-4);
+    assert!(
+        (ours.info.obj_primal - cobj).abs() < 1e-3_f64.max(1e-3 * cobj.abs()),
+        "obj ours={} clarabel={}",
+        ours.info.obj_primal,
+        cobj
+    );
+}
+
+#[test]
+fn sequence_r1_evar_vs_clarabel() {
+    let n = 4usize;
+    let t = 10usize;
+    let dates = 6usize;
+    let l = vec![0.0; n];
+    let u = vec![1.0; n];
+    let p = vec![1.0 / t as f64; t];
+    let r0 = returns(t, n, 11);
+    let q0 = models::evar(&r0, &p, 0.8, &l, &u);
+
+    let mut st = Settings::default();
+    st.engine = EngineKind::Auto;
+    st.ipm_max_iter = 80;
+    let mut ws = setup(
+        Qcp {
+            p: q0.p.clone(),
+            q: q0.q.clone(),
+            a: q0.a.clone(),
+            b: q0.b.clone(),
+            cones: q0.cones.clone(),
+        },
+        st,
+    )
+    .unwrap();
+
+    let P = to_clarabel(&q0.p.upper_triangle());
+    let A = to_clarabel(&q0.a);
+    let cones = cones_clarabel(&q0);
+    let mut clar = DefaultSolver::new(&P, &q0.q, &A, &q0.b, &cones, clarabel_settings());
+
+    let mut t_conix = 0.0_f64;
+    let mut t_clar = 0.0_f64;
+    let t0 = Instant::now();
+    let s = solve(&mut ws);
+    t_conix += t0.elapsed().as_secs_f64();
+    assert_eq!(s.info.status, Status::Solved, "date0 {:?}", s.info);
+    clar.solve();
+    assert_eq!(clar.solution.status, SolverStatus::Solved);
+
+    for d in 1..dates {
+        let r = returns(t, n, 11 + d as u64 * 17);
+        let q = models::evar(&r, &p, 0.8, &l, &u);
+        ws.update_a(&q.a).unwrap();
+        ws.update_b(&q.b).unwrap();
+        ws.update_q(&q.q).unwrap();
+        let t0 = Instant::now();
+        let s = solve(&mut ws);
+        t_conix += t0.elapsed().as_secs_f64();
+        assert_eq!(s.info.status, Status::Solved, "date{d} {:?}", s.info);
+        assert!(
+            s.info.res_pri <= 1e-6 && s.info.res_dual <= 1e-6 && s.info.res_gap <= 1e-6,
+            "date{d} {:?}",
+            s.info
+        );
+
+        let t1 = Instant::now();
+        clar.update_A(&to_clarabel(&q.a)).unwrap();
+        clar.update_b(&q.b).unwrap();
+        clar.update_q(&q.q).unwrap();
+        clar.solve();
+        t_clar += t1.elapsed().as_secs_f64();
+        assert_eq!(clar.solution.status, SolverStatus::Solved);
+        assert!(
+            (s.info.obj_primal - clar.solution.obj_val).abs()
+                < 1e-3_f64.max(1e-3 * clar.solution.obj_val.abs()),
+            "date{d} obj ours={} clarabel={}",
+            s.info.obj_primal,
+            clar.solution.obj_val
+        );
+    }
+    println!("R1 EVaR n={n} T={t} dates={dates}: ConiX={t_conix:.4}s  Clarabel-update={t_clar:.4}s");
+}
+
+#[test]
 fn sequence_r0_markowitz_vs_clarabel() {
     let n = 8usize;
     let dates = 20usize;

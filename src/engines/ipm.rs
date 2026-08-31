@@ -1,12 +1,13 @@
-//! Homogeneous primal-dual interior-point fallback.
+//! Primal-dual interior-point fallback.
 //!
 //! Polyhedral cones (zero + nonnegative) use Nesterov–Todd scaling
 //! \(H=\mathrm{diag}(s./z)\), which is the ADMM KKT with \(\rho_i=z_i/s_i\).
 //! The cached AMD order and symbolic factor are reused; only the numeric
-//! diagonals change. After the run, \(\rho\) and \(\sigma\) are restored so a
+//! diagonals change. After the run, \(\sigma\) and \(\rho\) are restored so a
 //! later ADMM step still matches the sequential contract.
 //!
-//! Non-polyhedral cones keep a dense Hessian Newton matrix (SOC / exp).
+//! Exponential / power / SOC use a dense barrier Newton system with Clarabel
+//! \(H_s\) and linearized centrality \(s=-\mu\nabla f^\ast(z)\).
 
 use crate::algebra::csc::CscMatrix;
 use crate::algebra::ldl::{LdlNumeric, LdlSymbolic};
@@ -299,92 +300,96 @@ fn force_polyhedral_interior(ws: &mut Workspace) {
 fn run_dense(ws: &mut Workspace) {
     let n = ws.x.len();
     let m = ws.s.len();
-    initialize_interior(ws);
-    let mut mu = duality_mu(ws);
+    unit_initialize(ws);
     let mut status = Status::Unsolved;
     let mut iter = 0usize;
     let mut h = vec![0.0; m * m];
-    let mut sym: Option<LdlSymbolic> = None;
+    let mut kkt: Option<DenseKkt> = None;
+    let mut primal_dual = true;
     let max_iter = ws.settings.ipm_max_iter.min(ws.settings.max_iter).max(1);
+    let ir = ws.settings.iterative_refinement.max(1);
+    let eps = ws.settings.eps_abs.max(ws.settings.eps_rel);
+    let mut n_tiny = 0usize;
+    let mut c = vec![0.0; m];
+    let mut ds = vec![0.0; m];
+    let mut ds_aff = vec![0.0; m];
+    let mut rhs = vec![0.0; n + m];
+    let mut d_aff = vec![0.0; n + m];
+    let mut d = vec![0.0; n + m];
+    let mut rd = vec![0.0; n];
+    let mut rp = vec![0.0; m];
+    let mut atz = vec![0.0; n];
 
     while iter < max_iter {
         iter += 1;
-        fill_scaling(ws, &mut h, mu);
+        let mu = duality_mu(ws);
+        if !fill_scaling(ws, &mut h, mu, primal_dual) {
+            unit_initialize(ws);
+            primal_dual = false;
+            continue;
+        }
         let k_csc = assemble_ipm_kkt(&ws.p, &ws.a, &h, n, m);
-        if sym.as_ref().map(|s| s.n != k_csc.n).unwrap_or(true) {
-            match LdlSymbolic::analyze(&k_csc) {
-                Ok(s) => sym = Some(s),
-                Err(_) => {
+        match kkt.as_mut() {
+            Some(k) if k.upper.same_pattern(&k_csc) => {
+                k.upper = k_csc;
+                k.perm_mat = k.upper.permute_sym_upper(&k.perm);
+                if k.refactor().is_err() {
                     status = Status::Indeterminate;
                     break;
                 }
             }
-        }
-        let fac = match LdlNumeric::factor_regularized(&k_csc, sym.as_ref().unwrap(), n, 1e-12) {
-            Ok(f) => f,
-            Err(_) => match LdlNumeric::factor(&k_csc, sym.as_ref().unwrap()) {
-                Ok(f) => f,
+            _ => match DenseKkt::new(k_csc, n) {
+                Ok(k) => kkt = Some(k),
                 Err(_) => {
                     status = Status::Indeterminate;
                     break;
                 }
             },
-        };
+        }
+        let ksys = kkt.as_mut().unwrap();
         ws.factorizations += 1;
 
-        let mut rd = vec![0.0; n];
-        ws.p.sym_mul_add(&ws.x, &mut rd, 1.0);
-        let mut atz = vec![0.0; n];
-        ws.a.tmul(&ws.z, &mut atz);
-        for i in 0..n {
-            rd[i] += atz[i] + ws.q[i];
-        }
-        let mut rp = vec![0.0; m];
-        ws.a.mul(&ws.x, &mut rp);
-        for i in 0..m {
-            rp[i] += ws.s[i] - ws.b[i];
-        }
+        fill_rd_rp(ws, &mut rd, &mut rp, &mut atz);
+        affine_c(ws, &mut c);
+        pack_rhs(&mut rhs, &rd, &rp, &c, n, m);
+        ksys.solve(&rhs, &mut d_aff, ir);
+        recover_ds(&mut ds_aff, &c, &h, m, &d_aff[n..]);
 
-        let mut rhs = vec![0.0; n + m];
-        for i in 0..n {
-            rhs[i] = -rd[i];
-        }
-        for i in 0..m {
-            rhs[n + i] = -rp[i] + ws.s[i];
-        }
-        let mut d_aff = rhs.clone();
-        solve_perm(&fac, &mut d_aff);
-        let dz_aff = &d_aff[n..];
-        let mut ds_aff = vec![0.0; m];
-        for i in 0..m {
-            ds_aff[i] = -ws.s[i] - h_mul_row(&h, m, i, dz_aff);
-        }
-        let alpha_p = max_step(ws, &ds_aff);
-        let alpha_d = max_step_dual(ws, dz_aff);
-        let mut s_aff = ws.s.clone();
-        let mut z_aff = ws.z.clone();
-        for i in 0..m {
-            s_aff[i] += alpha_p * ds_aff[i];
-            z_aff[i] += alpha_d * dz_aff[i];
-        }
-        let mu_aff = dot(&s_aff, &z_aff) / (m.max(1) as f64);
-        let sigma = (mu_aff / mu.max(1e-16)).clamp(0.0, 1.0).powi(3);
+        let ap_aff = max_step(ws, &ds_aff);
+        let ad_aff = max_step_dual(ws, &d_aff[n..]);
+        let alpha_aff = ap_aff.min(ad_aff).clamp(0.0, 1.0);
+        let sigma = (1.0 - alpha_aff).clamp(0.0, 1.0).powi(3);
 
-        for i in 0..n {
-            rhs[i] = -rd[i];
+        combined_c(ws, sigma, mu, &ds_aff, &d_aff[n..], &mut c);
+        pack_rhs(&mut rhs, &rd, &rp, &c, n, m);
+        ksys.solve(&rhs, &mut d, ir);
+        recover_ds(&mut ds, &c, &h, m, &d[n..]);
+
+        let ap = max_step(ws, &ds);
+        let ad = max_step_dual(ws, &d[n..]);
+        let a = 0.99_f64 * ap.min(ad).max(0.0);
+        if primal_dual && a < 1e-2 {
+            primal_dual = false;
+            iter = iter.saturating_sub(1);
+            continue;
         }
-        for i in 0..m {
-            rhs[n + i] = -rp[i] + ws.s[i] - sigma * mu / ws.z[i].max(1e-16);
+        if ws.settings.verbose {
+            eprintln!(
+                "ipm {iter} a={a:.3e} ap={ap:.3e} ad={ad:.3e} mu={mu:.3e} rp={:.3e} rd={:.3e} pd={primal_dual}",
+                inf_norm(&rp),
+                inf_norm(&rd)
+            );
         }
-        let mut d = rhs;
-        solve_perm(&fac, &mut d);
-        let mut ds = vec![0.0; m];
-        for i in 0..m {
-            ds[i] = -ws.s[i] + sigma * mu / ws.z[i].max(1e-16) - h_mul_row(&h, m, i, &d[n..]);
+        if a < 1e-12 {
+            n_tiny += 1;
+            if n_tiny > 4 {
+                break;
+            }
+            unit_initialize(ws);
+            primal_dual = false;
+            continue;
         }
-        let ap = 0.99 * max_step(ws, &ds);
-        let ad = 0.99 * max_step_dual(ws, &d[n..]);
-        let a = ap.min(ad).max(0.0);
+        n_tiny = 0;
         for i in 0..n {
             ws.x[i] += a * d[i];
         }
@@ -392,16 +397,14 @@ fn run_dense(ws: &mut Workspace) {
             ws.s[i] += a * ds[i];
             ws.z[i] += a * d[n + i];
         }
-        force_interior(ws);
-        mu = duality_mu(ws);
+        snap_zero_cone(ws);
 
-        let r =
-            crate::verifier::residuals(&ws.p, &ws.q, &ws.a, &ws.b, &ws.cones, &ws.x, &ws.s, &ws.z);
-        if crate::verifier::solved_at(&r, ws.settings.eps_abs) {
+        let r = ws.original_residuals();
+        if crate::verifier::solved_at(&r, eps) {
             status = Status::Solved;
             break;
         }
-        if mu < 1e-14 && r.res_pri < 1e-4 && r.res_dual < 1e-4 {
+        if duality_mu(ws) < 1e-14 && r.res_pri < eps && r.res_dual < eps {
             status = Status::Solved;
             break;
         }
@@ -412,49 +415,198 @@ fn run_dense(ws: &mut Workspace) {
     ws.info.status = status;
     ws.info.iterations = iter;
     ws.info.engine = "ipm";
+    ws.sync_w();
 }
 
-fn initialize_interior(ws: &mut Workspace) {
-    if inf_norm(&ws.s) < 1e-14 {
-        ws.s.fill(1.0);
+struct DenseKkt {
+    n: usize,
+    upper: CscMatrix,
+    perm: Vec<usize>,
+    perm_mat: CscMatrix,
+    sym: LdlSymbolic,
+    fac: LdlNumeric,
+    work: Vec<f64>,
+    work2: Vec<f64>,
+}
+
+impl DenseKkt {
+    fn new(upper: CscMatrix, n_pos: usize) -> Result<Self, ()> {
+        let perm = crate::algebra::amd::order_upper(&upper);
+        let perm_mat = upper.permute_sym_upper(&perm);
+        let sym = LdlSymbolic::analyze(&perm_mat).map_err(|_| ())?;
+        let fac = LdlNumeric::factor_regularized(&perm_mat, &sym, n_pos, 1e-12)
+            .or_else(|_| LdlNumeric::factor(&perm_mat, &sym))
+            .map_err(|_| ())?;
+        let dim = upper.n;
+        Ok(Self {
+            n: n_pos,
+            upper,
+            perm,
+            perm_mat,
+            sym,
+            fac,
+            work: vec![0.0; dim],
+            work2: vec![0.0; dim],
+        })
     }
-    if inf_norm(&ws.z) < 1e-14 {
-        ws.z.fill(1.0);
+
+    fn refactor(&mut self) -> Result<(), ()> {
+        self.fac = LdlNumeric::factor_regularized(&self.perm_mat, &self.sym, self.n, 1e-12)
+            .or_else(|_| LdlNumeric::factor(&self.perm_mat, &self.sym))
+            .map_err(|_| ())?;
+        Ok(())
     }
+
+    fn solve(&mut self, rhs: &[f64], sol: &mut [f64], refinement: usize) {
+        crate::algebra::permute(&self.perm, rhs, &mut self.work);
+        self.fac.solve_in_place(&mut self.work);
+        crate::algebra::inv_permute(&self.perm, &self.work, sol);
+        for _ in 0..refinement {
+            self.work2.fill(0.0);
+            self.upper.sym_mul_add(sol, &mut self.work2, 1.0);
+            for i in 0..rhs.len() {
+                self.work2[i] = rhs[i] - self.work2[i];
+            }
+            crate::algebra::permute(&self.perm, &self.work2, &mut self.work);
+            self.fac.solve_in_place(&mut self.work);
+            crate::algebra::inv_permute(&self.perm, &self.work, &mut self.work2);
+            for i in 0..sol.len() {
+                sol[i] += self.work2[i];
+            }
+        }
+    }
+}
+
+fn pack_rhs(rhs: &mut [f64], rd: &[f64], rp: &[f64], c: &[f64], n: usize, m: usize) {
+    for i in 0..n {
+        rhs[i] = -rd[i];
+    }
+    for i in 0..m {
+        rhs[n + i] = c[i] - rp[i];
+    }
+}
+
+fn recover_ds(ds: &mut [f64], c: &[f64], h: &[f64], m: usize, dz: &[f64]) {
+    for i in 0..m {
+        ds[i] = -c[i] - h_mul_row(h, m, i, dz);
+    }
+}
+
+fn affine_c(ws: &Workspace, c: &mut [f64]) {
+    c.fill(0.0);
+    for (cone, &off) in ws.cones.cones.iter().zip(&ws.cones.offsets) {
+        match cone {
+            Cone::Zero { .. } => {}
+            _ => {
+                let d = cone.dim();
+                c[off..off + d].copy_from_slice(&ws.s[off..off + d]);
+            }
+        }
+    }
+}
+
+fn combined_c(
+    ws: &Workspace,
+    sigma: f64,
+    mu: f64,
+    ds_aff: &[f64],
+    dz_aff: &[f64],
+    c: &mut [f64],
+) {
+    affine_c(ws, c);
+    let sigu = sigma * mu;
+    for (cone, &off) in ws.cones.cones.iter().zip(&ws.cones.offsets) {
+        match cone {
+            Cone::Zero { .. } => {}
+            Cone::Nonnegative { dim } => {
+                for k in 0..*dim {
+                    let i = off + k;
+                    let zi = ws.z[i].max(1e-16);
+                    c[i] += -sigu / zi + ds_aff[i] * dz_aff[i] / zi;
+                }
+            }
+            Cone::Exponential => {
+                if let Some(g) = crate::cones::exp_dual_grad(&ws.z[off..off + 3]) {
+                    for k in 0..3 {
+                        c[off + k] += sigu * g[k];
+                    }
+                }
+            }
+            Cone::Power { alpha } => {
+                if let Some((g, _)) = crate::cones::power_dual_grad_h(&ws.z[off..off + 3], *alpha) {
+                    for k in 0..3 {
+                        c[off + k] += sigu * g[k];
+                    }
+                }
+            }
+            Cone::SecondOrder { dim } => {
+                // Mehrotra on the leading SOC residual, plus σμ on the identity.
+                let i0 = off;
+                c[i0] -= sigu;
+                for k in 0..*dim {
+                    c[off + k] += ds_aff[off + k] * dz_aff[off + k];
+                }
+            }
+            _ => {
+                for k in 0..cone.dim() {
+                    let i = off + k;
+                    let zi = ws.z[i].abs().max(1e-16);
+                    c[i] += -sigu / zi + ds_aff[i] * dz_aff[i] / zi;
+                }
+            }
+        }
+    }
+}
+
+fn unit_initialize(ws: &mut Workspace) {
+    ws.x.fill(0.0);
     for (cone, &off) in ws.cones.cones.iter().zip(&ws.cones.offsets) {
         match cone {
             Cone::Zero { dim } => {
                 for k in 0..*dim {
                     ws.s[off + k] = 0.0;
+                    ws.z[off + k] = 0.0;
                 }
             }
             Cone::Nonnegative { dim } => {
                 for k in 0..*dim {
-                    ws.s[off + k] = ws.s[off + k].abs().max(1.0);
-                    ws.z[off + k] = ws.z[off + k].abs().max(1.0);
+                    ws.s[off + k] = 1.0;
+                    ws.z[off + k] = 1.0;
                 }
             }
             Cone::SecondOrder { dim } => {
-                let t = off;
-                ws.s[t] = ws.s[t].abs() + nrm(&ws.s[t + 1..t + dim]) + 1.0;
-                ws.z[t] = ws.z[t].abs() + nrm(&ws.z[t + 1..t + dim]) + 1.0;
+                for k in 0..*dim {
+                    ws.s[off + k] = 0.0;
+                    ws.z[off + k] = 0.0;
+                }
+                ws.s[off] = 1.0;
+                ws.z[off] = 1.0;
             }
-            Cone::Exponential
-            | Cone::Power { .. }
-            | Cone::DualExponential
-            | Cone::DualPower { .. } => {
-                ws.s[off] = -1.0;
-                ws.s[off + 1] = 1.0;
-                ws.s[off + 2] = 2.0;
-                ws.z[off] = -1.0;
-                ws.z[off + 1] = 1.0;
-                ws.z[off + 2] = 2.0;
+            Cone::Exponential | Cone::DualExponential => {
+                let u = crate::cones::exp_unit_point();
+                ws.s[off..off + 3].copy_from_slice(&u);
+                ws.z[off..off + 3].copy_from_slice(&u);
+            }
+            Cone::Power { alpha } | Cone::DualPower { alpha } => {
+                let u = crate::cones::power_unit_point(*alpha);
+                ws.s[off..off + 3].copy_from_slice(&u);
+                ws.z[off..off + 3].copy_from_slice(&u);
             }
             _ => {
                 for k in 0..cone.dim() {
-                    ws.s[off + k] = ws.s[off + k].abs() + 1.0;
-                    ws.z[off + k] = ws.z[off + k].abs() + 1.0;
+                    ws.s[off + k] = 1.0;
+                    ws.z[off + k] = 1.0;
                 }
+            }
+        }
+    }
+}
+
+fn snap_zero_cone(ws: &mut Workspace) {
+    for (cone, &off) in ws.cones.cones.iter().zip(&ws.cones.offsets) {
+        if let Cone::Zero { dim } = cone {
+            for k in 0..*dim {
+                ws.s[off + k] = 0.0;
             }
         }
     }
@@ -462,32 +614,22 @@ fn initialize_interior(ws: &mut Workspace) {
 
 fn duality_mu(ws: &Workspace) -> f64 {
     let mut gap = 0.0_f64;
-    let mut nu = 0.0_f64;
     for (cone, &off) in ws.cones.cones.iter().zip(&ws.cones.offsets) {
-        match cone {
-            Cone::Zero { .. } => {}
-            _ => {
-                let d = cone.dim();
-                gap += dot(&ws.s[off..off + d], &ws.z[off..off + d]);
-                nu += d as f64;
-            }
-        }
+        let d = cone.dim();
+        gap += dot(&ws.s[off..off + d], &ws.z[off..off + d]);
     }
-    if nu == 0.0 {
-        1.0
-    } else {
-        (gap / nu).max(1e-16)
-    }
+    let nu = ws.cones.barrier_degree().max(1) as f64;
+    (gap / nu).max(1e-16)
 }
 
-fn fill_scaling(ws: &Workspace, h: &mut [f64], mu: f64) {
+fn fill_scaling(ws: &Workspace, h: &mut [f64], mu: f64, primal_dual: bool) -> bool {
     let m = ws.s.len();
     h.fill(0.0);
     for (cone, &off) in ws.cones.cones.iter().zip(&ws.cones.offsets) {
         match cone {
             Cone::Zero { dim } => {
                 for k in 0..*dim {
-                    h[(off + k) * m + (off + k)] = 1e-8;
+                    h[(off + k) * m + (off + k)] = 1e-12;
                 }
             }
             Cone::Nonnegative { dim } => {
@@ -498,16 +640,42 @@ fn fill_scaling(ws: &Workspace, h: &mut [f64], mu: f64) {
                 }
             }
             Cone::SecondOrder { dim } => {
-                soc_hessian(&ws.s[off..off + dim], mu, h, m, off);
+                if let Some(hs) =
+                    crate::cones::soc_nt_hessian(&ws.s[off..off + dim], &ws.z[off..off + dim])
+                {
+                    for i in 0..*dim {
+                        for j in 0..*dim {
+                            h[(off + i) * m + (off + j)] = hs[i * dim + j];
+                        }
+                    }
+                } else {
+                    for k in 0..*dim {
+                        h[(off + k) * m + (off + k)] = 1.0;
+                    }
+                }
             }
             Cone::Exponential => {
-                exp_dual_hessian(&ws.z[off..off + 3], mu, h, m, off);
+                let Some(hs) =
+                    crate::cones::exp_hs(&ws.s[off..off + 3], &ws.z[off..off + 3], mu, primal_dual)
+                else {
+                    return false;
+                };
+                for i in 0..3 {
+                    for j in 0..3 {
+                        h[(off + i) * m + (off + j)] = hs[i * 3 + j];
+                    }
+                }
             }
             Cone::Power { alpha } => {
-                for k in 0..3 {
-                    h[(off + k) * m + (off + k)] = mu / ws.z[off + k].max(1e-8).powi(2);
+                let Some((_, hd)) = crate::cones::power_dual_grad_h(&ws.z[off..off + 3], *alpha)
+                else {
+                    return false;
+                };
+                for i in 0..3 {
+                    for j in 0..3 {
+                        h[(off + i) * m + (off + j)] = mu * hd[i * 3 + j];
+                    }
                 }
-                let _ = alpha;
             }
             _ => {
                 for k in 0..cone.dim() {
@@ -516,43 +684,7 @@ fn fill_scaling(ws: &Workspace, h: &mut [f64], mu: f64) {
             }
         }
     }
-}
-
-fn soc_hessian(s: &[f64], mu: f64, h: &mut [f64], m: usize, off: usize) {
-    let n = s.len();
-    let mut js = s[0] * s[0];
-    for k in 1..n {
-        js -= s[k] * s[k];
-    }
-    js = js.max(1e-12);
-    let c1 = 2.0 * mu / js;
-    let c2 = 4.0 * mu / (js * js);
-    for i in 0..n {
-        let jsi = if i == 0 { s[0] } else { -s[i] };
-        for j in i..n {
-            let jsj = if j == 0 { s[0] } else { -s[j] };
-            let mut v = c2 * jsi * jsj;
-            if i == j {
-                v += if i == 0 { c1 } else { -c1 };
-            }
-            h[(off + i) * m + (off + j)] = v;
-            h[(off + j) * m + (off + i)] = v;
-        }
-    }
-}
-
-fn exp_dual_hessian(z: &[f64], mu: f64, h: &mut [f64], m: usize, off: usize) {
-    for i in 0..3 {
-        for j in 0..3 {
-            let mut v = if i == j {
-                mu / z[i].abs().max(1e-6).powi(2)
-            } else {
-                0.0
-            };
-            v += 1e-6 * mu;
-            h[(off + i) * m + (off + j)] = v;
-        }
-    }
+    true
 }
 
 fn h_mul_row(h: &[f64], m: usize, i: usize, z: &[f64]) -> f64 {
@@ -566,19 +698,11 @@ fn h_mul_row(h: &[f64], m: usize, i: usize, z: &[f64]) -> f64 {
 fn assemble_ipm_kkt(p: &CscMatrix, a: &CscMatrix, h: &[f64], n: usize, m: usize) -> CscMatrix {
     let mut trips = Vec::new();
     let pu = p.upper_triangle();
-    let mut has = vec![false; n];
     for j in 0..n {
         for idx in pu.col_ptr[j]..pu.col_ptr[j + 1] {
-            let i = pu.row_idx[idx];
-            trips.push((i, j, pu.x[idx]));
-            if i == j {
-                has[j] = true;
-            }
+            trips.push((pu.row_idx[idx], j, pu.x[idx]));
         }
-    }
-    for j in 0..n {
         trips.push((j, j, 1e-10));
-        let _ = has[j];
     }
     for c in 0..n {
         for idx in a.col_ptr[c]..a.col_ptr[c + 1] {
@@ -586,19 +710,16 @@ fn assemble_ipm_kkt(p: &CscMatrix, a: &CscMatrix, h: &[f64], n: usize, m: usize)
             trips.push((c, n + r, a.x[idx]));
         }
     }
+    // Always write every H entry (including zeros) so the AMD pattern is
+    // iteration-invariant. H is block-diagonal across cones, but a dense
+    // lower-right block is cheap at the finance sizes we target.
     for i in 0..m {
         for j in i..m {
             let v = -h[i * m + j];
-            if v.abs() > 1e-18 || i == j {
-                trips.push((n + i, n + j, if i == j { v - 1e-10 } else { v }));
-            }
+            trips.push((n + i, n + j, if i == j { v - 1e-10 } else { v }));
         }
     }
-    CscMatrix::from_triplets(n + m, n + m, &trips).upper_triangle()
-}
-
-fn solve_perm(fac: &LdlNumeric, x: &mut [f64]) {
-    fac.solve_in_place(x);
+    CscMatrix::from_triplets_keep_zeros(n + m, n + m, &trips)
 }
 
 fn max_step(ws: &Workspace, ds: &[f64]) -> f64 {
@@ -608,17 +729,32 @@ fn max_step(ws: &Workspace, ds: &[f64]) -> f64 {
             Cone::Nonnegative { dim } => {
                 for k in 0..*dim {
                     if ds[off + k] < 0.0 {
-                        a = a.min(-0.99 * ws.s[off + k] / ds[off + k]);
+                        a = a.min(-ws.s[off + k] / ds[off + k]);
                     }
                 }
             }
             Cone::SecondOrder { dim } => {
                 a = a.min(soc_step(&ws.s[off..off + dim], &ds[off..off + dim]));
             }
+            Cone::Exponential => {
+                a = a.min(crate::cones::exp_backtrack(
+                    &ws.s[off..off + 3],
+                    &ds[off..off + 3],
+                    true,
+                ));
+            }
+            Cone::Power { alpha } => {
+                a = a.min(crate::cones::power_backtrack(
+                    &ws.s[off..off + 3],
+                    &ds[off..off + 3],
+                    *alpha,
+                    true,
+                ));
+            }
             _ => {
                 for k in 0..cone.dim() {
                     if ds[off + k] < 0.0 && ws.s[off + k] > 0.0 {
-                        a = a.min(-0.99 * ws.s[off + k] / ds[off + k]);
+                        a = a.min(-ws.s[off + k] / ds[off + k]);
                     }
                 }
             }
@@ -630,12 +766,33 @@ fn max_step(ws: &Workspace, ds: &[f64]) -> f64 {
 fn max_step_dual(ws: &Workspace, dz: &[f64]) -> f64 {
     let mut a = 1.0_f64;
     for (cone, &off) in ws.cones.cones.iter().zip(&ws.cones.offsets) {
-        if let Cone::Nonnegative { dim } = cone {
-            for k in 0..*dim {
-                if dz[off + k] < 0.0 {
-                    a = a.min(-0.99 * ws.z[off + k] / dz[off + k]);
+        match cone {
+            Cone::Nonnegative { dim } => {
+                for k in 0..*dim {
+                    if dz[off + k] < 0.0 {
+                        a = a.min(-ws.z[off + k] / dz[off + k]);
+                    }
                 }
             }
+            Cone::SecondOrder { dim } => {
+                a = a.min(soc_step(&ws.z[off..off + dim], &dz[off..off + dim]));
+            }
+            Cone::Exponential => {
+                a = a.min(crate::cones::exp_backtrack(
+                    &ws.z[off..off + 3],
+                    &dz[off..off + 3],
+                    false,
+                ));
+            }
+            Cone::Power { alpha } => {
+                a = a.min(crate::cones::power_backtrack(
+                    &ws.z[off..off + 3],
+                    &dz[off..off + 3],
+                    *alpha,
+                    false,
+                ));
+            }
+            _ => {}
         }
     }
     a.clamp(0.0, 1.0)
@@ -643,7 +800,7 @@ fn max_step_dual(ws: &Workspace, dz: &[f64]) -> f64 {
 
 fn soc_step(s: &[f64], d: &[f64]) -> f64 {
     let mut a = 1.0_f64;
-    for _ in 0..20 {
+    for _ in 0..24 {
         let t0 = s[0] + a * d[0];
         let mut n2 = 0.0;
         for i in 1..s.len() {
@@ -656,19 +813,4 @@ fn soc_step(s: &[f64], d: &[f64]) -> f64 {
         a *= 0.5;
     }
     a
-}
-
-fn force_interior(ws: &mut Workspace) {
-    for (cone, &off) in ws.cones.cones.iter().zip(&ws.cones.offsets) {
-        if let Cone::Nonnegative { dim } = cone {
-            for k in 0..*dim {
-                ws.s[off + k] = ws.s[off + k].max(1e-12);
-                ws.z[off + k] = ws.z[off + k].max(1e-12);
-            }
-        }
-    }
-}
-
-fn nrm(x: &[f64]) -> f64 {
-    x.iter().map(|v| v * v).sum::<f64>().sqrt()
 }

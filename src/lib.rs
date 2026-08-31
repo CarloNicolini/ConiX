@@ -1,6 +1,7 @@
 //! ConiX: sequential conic optimizer.
 
 pub mod algebra;
+pub mod capi;
 pub mod cones;
 pub mod engines;
 pub mod kkt;

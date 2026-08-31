@@ -39,12 +39,16 @@ pub fn run(ws: &mut Workspace) {
     let mut u = vec![0.0; l];
     let mut ut = vec![0.0; l];
     let mut rsk = vec![0.0; l];
+    let mut aa = crate::engines::anderson::Anderson::new(ws.settings.anderson_memory, l);
     let mut status = Status::Unsolved;
     let mut iter = 0usize;
     let alpha = ws.settings.alpha.min(1.8).max(1.0);
 
     while iter < ws.settings.max_iter {
         iter += 1;
+        if ws.settings.anderson_memory > 0 {
+            aa.capture_in(&v);
+        }
         // linear resolvent
         ut[..n + m].copy_from_slice(&v[..n + m]);
         for i in n..n + m {
@@ -81,6 +85,9 @@ pub fn run(ws: &mut Workspace) {
         let target = (l as f64).sqrt();
         for vi in v.iter_mut() {
             *vi *= target / vn;
+        }
+        if ws.settings.anderson_memory > 0 {
+            aa.maybe_replace(&mut v);
         }
 
         if iter % ws.settings.check_termination == 0 || iter == 1 {

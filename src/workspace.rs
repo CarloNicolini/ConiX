@@ -297,60 +297,64 @@ fn run_engines(ws: &mut Workspace) {
 fn run_auto(ws: &mut Workspace) {
     let poly = ws.cones.is_polyhedral();
     let r0_reuse = ws.has_solution && ws.last_update == crate::status::UpdateClass::R0;
-    if poly && !r0_reuse {
-        // R1/setup rebuilds the numeric factor anyway; NT-IPM is the high-accuracy
-        // polyhedral engine. ADMM is the R0 specialist (cached LDL).
-        crate::engines::ipm::run(ws);
-        if matches!(
-            ws.info.status,
-            crate::status::Status::Solved
-                | crate::status::Status::PrimalInfeasible
-                | crate::status::Status::DualInfeasible
-        ) {
-            ws.last_engine = EngineKind::Ipm;
-            return;
-        }
-        let bak_x = ws.x.clone();
-        let bak_s = ws.s.clone();
-        let bak_z = ws.z.clone();
-        let bak_info = ws.info.clone();
-        let ipm_iters = ws.info.iterations;
-        let saved_max = ws.settings.max_iter;
-        ws.settings.max_iter = saved_max.min(ws.settings.auto_admm_max_iter);
+    if poly && r0_reuse {
         crate::engines::admm::run(ws);
-        ws.settings.max_iter = saved_max;
-        ws.info.iterations += ipm_iters;
-        let r_ipm = {
-            let mut x = bak_x.clone();
-            let mut s = bak_s.clone();
-            let mut z = bak_z.clone();
-            crate::scale::unscale_solution(&ws.eq, &mut x, &mut s, &mut z);
-            crate::verifier::residuals(
-                &ws.orig.p,
-                &ws.orig.q,
-                &ws.orig.a,
-                &ws.orig.b,
-                &ws.orig.cones,
-                &x,
-                &s,
-                &z,
-            )
-        };
-        let r_admm = ws.original_residuals();
-        if crate::verifier::merit(&r_admm) > crate::verifier::merit(&r_ipm) {
-            ws.x = bak_x;
-            ws.s = bak_s;
-            ws.z = bak_z;
-            ws.info = bak_info;
-            ws.sync_w();
-            ws.last_engine = EngineKind::Ipm;
-        } else {
-            ws.last_engine = EngineKind::Admm;
-        }
         return;
     }
 
+    // Setup/R1 polyhedral, and every nonsymmetric problem: IPM first.
+    crate::engines::ipm::run(ws);
+    if matches!(
+        ws.info.status,
+        crate::status::Status::Solved
+            | crate::status::Status::PrimalInfeasible
+            | crate::status::Status::DualInfeasible
+    ) {
+        ws.last_engine = EngineKind::Ipm;
+        return;
+    }
+    let bak_x = ws.x.clone();
+    let bak_s = ws.s.clone();
+    let bak_z = ws.z.clone();
+    let bak_info = ws.info.clone();
+    let ipm_iters = ws.info.iterations;
+    let saved_max = ws.settings.max_iter;
+    let admm_cap = if poly {
+        saved_max.min(ws.settings.auto_admm_max_iter)
+    } else {
+        saved_max
+    };
+    ws.settings.max_iter = admm_cap;
     crate::engines::admm::run(ws);
+    ws.settings.max_iter = saved_max;
+    ws.info.iterations += ipm_iters;
+    let r_ipm = {
+        let mut x = bak_x.clone();
+        let mut s = bak_s.clone();
+        let mut z = bak_z.clone();
+        crate::scale::unscale_solution(&ws.eq, &mut x, &mut s, &mut z);
+        crate::verifier::residuals(
+            &ws.orig.p,
+            &ws.orig.q,
+            &ws.orig.a,
+            &ws.orig.b,
+            &ws.orig.cones,
+            &x,
+            &s,
+            &z,
+        )
+    };
+    let r_admm = ws.original_residuals();
+    if crate::verifier::merit(&r_admm) > crate::verifier::merit(&r_ipm) {
+        ws.x = bak_x;
+        ws.s = bak_s;
+        ws.z = bak_z;
+        ws.info = bak_info;
+        ws.sync_w();
+        ws.last_engine = EngineKind::Ipm;
+    } else {
+        ws.last_engine = EngineKind::Admm;
+    }
 }
 
 fn finalize(ws: &mut Workspace) -> Solution {

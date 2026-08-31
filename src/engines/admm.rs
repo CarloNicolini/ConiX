@@ -4,7 +4,7 @@
 //! evaluated on the same `w` that was just projected onto `K`. We copy that
 //! convention: after `w ← w`, `s = Π_K(w_s)`, termination uses `x = w_prev[1:n]`.
 
-use crate::algebra::{axpy, copy_from, dot, inf_norm};
+use crate::algebra::{copy_from, inf_norm};
 use crate::kkt::KktSystem;
 use crate::status::{Status, UpdateClass};
 use crate::workspace::Workspace;
@@ -37,7 +37,7 @@ pub fn run(ws: &mut Workspace) {
 
     let mut status = Status::Unsolved;
     let mut iter = 0usize;
-    let mut aa = Anderson::new(ws.settings.anderson_memory, n + m);
+    let mut aa = crate::engines::anderson::Anderson::new(ws.settings.anderson_memory, n + m);
     let eps = ws.settings.eps_abs.max(ws.settings.eps_rel);
     let mut n_rho = 0usize;
 
@@ -378,94 +378,6 @@ fn solve_eq_qp(
     let mut sol = vec![0.0; dim];
     kkt.solve(&rhs, &mut sol, 8);
     Some(sol)
-}
-
-struct Anderson {
-    m: usize,
-    dim: usize,
-    f_hist: Vec<Vec<f64>>,
-    x_hist: Vec<Vec<f64>>,
-}
-
-impl Anderson {
-    fn new(m: usize, dim: usize) -> Self {
-        Self {
-            m,
-            dim,
-            f_hist: Vec::new(),
-            x_hist: Vec::new(),
-        }
-    }
-    fn reset(&mut self) {
-        self.f_hist.clear();
-        self.x_hist.clear();
-    }
-    fn capture_in(&mut self, x: &[f64]) {
-        if self.m == 0 {
-            return;
-        }
-        self.x_hist.push(x.to_vec());
-        if self.x_hist.len() > self.m + 1 {
-            self.x_hist.remove(0);
-        }
-    }
-    fn maybe_replace(&mut self, x: &mut [f64]) {
-        if self.m == 0 || self.x_hist.len() < 3 {
-            return;
-        }
-        let k = self.x_hist.len();
-        let f: Vec<f64> = (0..self.dim)
-            .map(|i| x[i] - self.x_hist[k - 1][i])
-            .collect();
-        self.f_hist.push(f);
-        if self.f_hist.len() > self.m {
-            self.f_hist.remove(0);
-        }
-        if self.f_hist.len() < 2 {
-            return;
-        }
-        let mk = self.f_hist.len() - 1;
-        let mut gram = vec![0.0; mk * mk];
-        let mut rhs = vec![0.0; mk];
-        let fk = &self.f_hist[mk];
-        for i in 0..mk {
-            let di: Vec<f64> = (0..self.dim)
-                .map(|t| self.f_hist[i + 1][t] - self.f_hist[i][t])
-                .collect();
-            rhs[i] = dot(&di, fk);
-            for j in 0..mk {
-                let dj: Vec<f64> = (0..self.dim)
-                    .map(|t| self.f_hist[j + 1][t] - self.f_hist[j][t])
-                    .collect();
-                gram[i * mk + j] = dot(&di, &dj);
-            }
-            gram[i * mk + i] += 1e-8;
-        }
-        if let Some(alpha) = solve_dense(&gram, &rhs, mk) {
-            let mut cand = x.to_vec();
-            let nrm_a: f64 = alpha.iter().map(|v| v.abs()).sum();
-            if nrm_a > 1e3 {
-                return;
-            }
-            for i in 0..mk {
-                axpy(&mut cand, -alpha[i], &{
-                    (0..self.dim)
-                        .map(|t| self.x_hist[self.x_hist.len() - mk + i][t])
-                        .collect::<Vec<_>>()
-                });
-            }
-            let prev = &self.x_hist[k - 1];
-            let mut n1 = 0.0;
-            let mut n2 = 0.0;
-            for i in 0..self.dim {
-                n1 += (x[i] - prev[i]).powi(2);
-                n2 += (cand[i] - prev[i]).powi(2);
-            }
-            if n2 < 0.9 * n1 && cand.iter().all(|v| v.is_finite()) {
-                x.copy_from_slice(&cand);
-            }
-        }
-    }
 }
 
 fn solve_dense(k: &[f64], rhs: &[f64], n: usize) -> Option<Vec<f64>> {

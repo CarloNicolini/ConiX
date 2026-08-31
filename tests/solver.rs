@@ -292,48 +292,110 @@ fn exp_cone_log() {
     let a = CscMatrix::from_triplets(3, 1, &[(2, 0, -1.0)]);
     let b = vec![1.0, 1.0, 0.0];
     let cones = CompositeCone::new(vec![Cone::Exponential]);
-    let mut st = Settings::default();
-    st.engine = EngineKind::Splitting;
-    st.max_iter = 8_000;
-    st.adaptive_rho = false;
-    let sol = solve_once(Qcp { p, q, a, b, cones }, st).unwrap();
-    assert!(
-        sol.info.status == Status::Solved || (sol.x[0] - std::f64::consts::E).abs() < 5e-2,
-        "exp {:?}",
-        sol.info
-    );
-    assert!((sol.x[0] - std::f64::consts::E).abs() < 0.15, "{:?}", sol.x);
+    for engine in [EngineKind::Splitting, EngineKind::Admm, EngineKind::Ipm] {
+        let mut st = Settings::default();
+        st.engine = engine;
+        st.max_iter = 8_000;
+        st.ipm_max_iter = 40;
+        st.adaptive_rho = false;
+        let sol = solve_once(
+            Qcp {
+                p: p.clone(),
+                q: q.clone(),
+                a: a.clone(),
+                b: b.clone(),
+                cones: cones.clone(),
+            },
+            st,
+        )
+        .unwrap();
+        assert_eq!(sol.info.status, Status::Solved, "{engine:?} {:?}", sol.info);
+        assert!(sol.info.res_pri <= 1e-6, "{engine:?} {:?}", sol.info);
+        assert!(sol.info.res_dual <= 1e-6, "{engine:?} {:?}", sol.info);
+        assert!(sol.info.res_gap <= 1e-6, "{engine:?} {:?}", sol.info);
+        assert!(
+            (sol.x[0] - std::f64::consts::E).abs() < 1e-4,
+            "{engine:?} {:?}",
+            sol.x
+        );
+    }
 }
 
 #[test]
 fn evar_solves() {
+    // T=10, p=0.1, β=0.8 so P(worst)=0.1 < 1-β=0.2 (non-degenerate EVaR).
     let r = vec![
         vec![0.01, 0.00],
         vec![-0.02, 0.01],
         vec![0.00, 0.02],
         vec![0.01, -0.01],
+        vec![-0.03, 0.02],
+        vec![0.02, -0.02],
+        vec![0.00, 0.01],
+        vec![-0.01, 0.00],
+        vec![0.015, -0.01],
+        vec![-0.005, 0.02],
     ];
-    let p = vec![0.25; 4];
-    let qcp = models::evar(&r, &p, 0.9, &[0.0, 0.0], &[1.0, 1.0]);
+    let p = vec![0.1; 10];
+    let qcp = models::evar(&r, &p, 0.8, &[0.0, 0.0], &[1.0, 1.0]);
     let mut st = Settings::default();
-    st.engine = EngineKind::Auto;
-    st.max_iter = 12_000;
+    st.engine = EngineKind::Ipm;
+    st.ipm_max_iter = 80;
     let sol = solve_once(qcp, st).unwrap();
+    assert_eq!(sol.info.status, Status::Solved, "evar {:?}", sol.info);
+    assert!(sol.info.res_pri <= 1e-6, "{:?}", sol.info);
+    assert!(sol.info.res_dual <= 1e-6, "{:?}", sol.info);
+    assert!(sol.info.res_gap <= 1e-6, "{:?}", sol.info);
+    assert!(sol.info.res_comp <= 1e-6, "{:?}", sol.info);
+    assert!(sol.info.res_cone <= 1e-6, "{:?}", sol.info);
     assert!(
-        sol.info.status == Status::Solved || (sol.info.res_pri < 5e-3 && sol.info.res_cone < 5e-3),
-        "evar {:?}",
-        sol.info
-    );
-    assert!(
-        (sol.x[0] + sol.x[1] - 1.0).abs() < 5e-2,
+        (sol.x[0] + sol.x[1] - 1.0).abs() < 1e-4,
         "budget {:?}",
         sol.x
     );
+    // Perspective t must stay off the t→0 essential-supremum ray.
+    assert!(sol.x[3] > 1e-5, "t_persp degenerate {:?}", sol.x);
+}
+
+#[test]
+fn sequential_evar_r1() {
+    let r1 = vec![
+        vec![0.01, 0.00],
+        vec![-0.02, 0.01],
+        vec![0.00, 0.02],
+        vec![0.01, -0.01],
+        vec![-0.03, 0.02],
+        vec![0.02, -0.02],
+        vec![0.00, 0.01],
+        vec![-0.01, 0.00],
+        vec![0.015, -0.01],
+        vec![-0.005, 0.02],
+    ];
+    let r2: Vec<Vec<f64>> = r1
+        .iter()
+        .map(|row| vec![row[1] * 0.8, row[0] * 1.1])
+        .collect();
+    let p = vec![0.1; 10];
+    let q1 = models::evar(&r1, &p, 0.8, &[0.0, 0.0], &[1.0, 1.0]);
+    let q2 = models::evar(&r2, &p, 0.8, &[0.0, 0.0], &[1.0, 1.0]);
+    let mut st = Settings::default();
+    st.engine = EngineKind::Auto;
+    st.ipm_max_iter = 80;
+    let mut ws = setup(q1, st).unwrap();
+    let s1 = solve(&mut ws);
+    assert_eq!(s1.info.status, Status::Solved, "{:?}", s1.info);
+    ws.update_a(&q2.a).unwrap();
+    ws.update_b(&q2.b).unwrap();
+    ws.update_q(&q2.q).unwrap();
+    let s2 = solve(&mut ws);
+    assert_eq!(s2.info.status, Status::Solved, "{:?}", s2.info);
+    assert_eq!(s2.info.update_class, conix::UpdateClass::R1);
+    assert!(s2.info.res_pri <= 1e-6 && s2.info.res_dual <= 1e-6, "{:?}", s2.info);
 }
 
 #[test]
 fn power_cone_bound() {
-    // min 0  s.t. (x, y, 1) ∈ POW(0.5) and x+y=2, which is feasible at (1,1).
+    // min 1/2 (x^2+y^2)  s.t. (x, y, 1) ∈ POW(0.5) and x+y=2, feasible at (1,1).
     let p = CscMatrix::identity(2);
     let q = vec![0.0, 0.0];
     let a = CscMatrix::from_triplets(
@@ -343,15 +405,29 @@ fn power_cone_bound() {
     );
     let b = vec![2.0, 0.0, 0.0, 1.0];
     let cones = CompositeCone::new(vec![Cone::Zero { dim: 1 }, Cone::Power { alpha: 0.5 }]);
-    let mut st = Settings::default();
-    st.engine = EngineKind::Admm;
-    st.max_iter = 8_000;
-    let sol = solve_once(Qcp { p, q, a, b, cones }, st).unwrap();
-    assert!(
-        (sol.x[0] + sol.x[1] - 2.0).abs() < 5e-2,
-        "power {:?}",
-        sol.info
-    );
+    for engine in [EngineKind::Admm, EngineKind::Ipm] {
+        let mut st = Settings::default();
+        st.engine = engine;
+        st.max_iter = 8_000;
+        st.ipm_max_iter = 40;
+        let sol = solve_once(
+            Qcp {
+                p: p.clone(),
+                q: q.clone(),
+                a: a.clone(),
+                b: b.clone(),
+                cones: cones.clone(),
+            },
+            st,
+        )
+        .unwrap();
+        assert_eq!(sol.info.status, Status::Solved, "{engine:?} {:?}", sol.info);
+        assert!(
+            (sol.x[0] + sol.x[1] - 2.0).abs() < 1e-4,
+            "{engine:?} {:?}",
+            sol.x
+        );
+    }
 }
 
 #[test]

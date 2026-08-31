@@ -12,7 +12,7 @@ One unmodified algorithm cannot simultaneously dominate broad cone coverage, hig
 
 1. **Cached homogeneous Douglas–Rachford** as the sequential fast path (factor reuse when \(P,A\) are fixed; true primal/dual/embedding warm starts).
 2. **Proximal ADMM** as a polyhedral/QP specialist (CVaR, MAD, CDaR, box-constrained Markowitz).
-3. **Homogeneous primal-dual IPM** as the certifying high-accuracy fallback (Clarabel-class cones, recentered hot starts).
+3. **Primal-dual IPM** as the certifying high-accuracy fallback (Clarabel cone scaling for exp/power/SOC; polyhedral NT on the cached KKT). The Andersen–Ye \((\tau,\kappa)\) embedding lives on the DR engine.
 4. **Safeguarded Anderson / limited-memory Broyden** only on a fixed splitting map.
 5. **Independent residual and ray verification** in original coordinates.
 
@@ -20,17 +20,17 @@ State that is persisted is typed: symbolic sparsity, numeric factorization, iter
 
 ## Status
 
-Rust kernel is in tree: sequential workspace, cached quasi-definite LDL, COSMO-style ADMM with sparse active-set polish, homogeneous DR, polyhedral NT-IPM on that same KKT, cone projections (zero, nonnegative, SOC, exponential, power, genpower, PSD), and finance builders (mean-variance, CVaR, MAD, CDaR, EVaR).
+Rust kernel is in tree: sequential workspace, cached quasi-definite LDL, COSMO-style ADMM with sparse active-set polish, homogeneous DR with safeguarded Anderson, polyhedral NT-IPM on that same KKT, a Clarabel-style barrier IPM for exponential/power/SOC, cone projections (zero, nonnegative, SOC, exponential, power, genpower, PSD), finance builders (mean-variance, CVaR, MAD, CDaR, EVaR), and a ctypes Python sequential API (`python/conix`).
 
-`EngineKind::Auto` on polyhedral problems uses ADMM when a numeric factor is still valid (R0) and NT-IPM when \(P\) or \(A\) must be numerically refactored (setup / R1). Every accepted `Solved` status is re-checked in original coordinates (\(r_p\), \(r_d\), \(r_K\), gap, complementarity). Finance slacks are reconstructed from \(x\) after R0/R1 data changes, not copied blindly.
+`EngineKind::Auto` on polyhedral problems uses ADMM when a numeric factor is still valid (R0) and NT-IPM when \(P\) or \(A\) must be numerically refactored (setup / R1). Non-polyhedral Auto (EVaR, exp, power, SOC) runs the barrier IPM first and keeps ADMM only if the independent checker prefers it. Every accepted `Solved` status is re-checked in original coordinates (\(r_p\), \(r_d\), \(r_K\), gap, complementarity). Finance slacks are reconstructed from \(x\) after R0/R1 data changes, not copied blindly.
 
 ```bash
 cargo test
 cargo test --test compare -- --nocapture
 cargo test --release --test compare -- --nocapture
 python3 scripts/scs_sequence.py
+# Python sequential API (after `cargo build --release`)
+CONIX_LIB=target/release/libconix.so python3 -c "import sys; sys.path.insert(0,'python'); import conix"
 ```
 
-Sequence-level timings versus Clarabel 0.9, OSQP 0.6, and SCS 3.2 are in [docs/benchmarks.md](docs/benchmarks.md). Rolling CVaR is independently `Solved` at \(10^{-6}\) on every date in those tests; ConiX sequence time on that LP is Clarabel-class. OSQP remains faster on small bound QPs. EVaR (exponential cones) still uses ADMM projections rather than a production nonsymmetric IPM.
-
-Remaining work toward the full objective: production Anderson, a stronger IPM for exponential/power/PSD, and a Python backtest API.
+Sequence-level timings versus Clarabel 0.9, OSQP 0.6, and SCS 3.2 are in [docs/benchmarks.md](docs/benchmarks.md). Rolling CVaR is independently `Solved` at \(10^{-6}\) on every date in those tests. Non-degenerate EVaR (exponential cones) is independently `Solved` at \(10^{-6}\) by the barrier IPM and matches Clarabel's objective. OSQP remains faster on small bound QPs.

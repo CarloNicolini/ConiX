@@ -2,6 +2,9 @@
 
 use crate::algebra::dot;
 
+mod nonsym;
+pub(crate) use nonsym::*;
+
 #[derive(Clone, Debug)]
 pub enum Cone {
     Zero {
@@ -47,6 +50,29 @@ impl Cone {
     pub fn is_polyhedral(&self) -> bool {
         matches!(self, Cone::Zero { .. } | Cone::Nonnegative { .. })
     }
+
+    /// Barrier parameter degree (Clarabel convention).
+    pub fn barrier_degree(&self) -> usize {
+        match self {
+            Cone::Zero { .. } => 0,
+            Cone::Nonnegative { dim } => *dim,
+            Cone::SecondOrder { .. } => 1,
+            Cone::Exponential | Cone::DualExponential => 3,
+            Cone::Power { .. } | Cone::DualPower { .. } => 3,
+            Cone::GenPower { alpha, .. } => alpha.len() + 1,
+            Cone::PsdTriangle { side } => *side,
+        }
+    }
+
+    pub fn is_symmetric(&self) -> bool {
+        matches!(
+            self,
+            Cone::Zero { .. }
+                | Cone::Nonnegative { .. }
+                | Cone::SecondOrder { .. }
+                | Cone::PsdTriangle { .. }
+        )
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -73,6 +99,14 @@ impl CompositeCone {
 
     pub fn is_polyhedral(&self) -> bool {
         self.cones.iter().all(|c| c.is_polyhedral())
+    }
+
+    pub fn is_symmetric(&self) -> bool {
+        self.cones.iter().all(|c| c.is_symmetric())
+    }
+
+    pub fn barrier_degree(&self) -> usize {
+        self.cones.iter().map(|c| c.barrier_degree()).sum()
     }
 
     pub fn project(&self, x: &mut [f64]) {
@@ -508,6 +542,86 @@ fn nrm(z: &[f64]) -> f64 {
     z.iter().map(|v| v * v).sum::<f64>().sqrt()
 }
 
+/// Interior of the primal exponential cone: \(y>0,z>0,\; y\exp(x/y)<z\).
+pub(crate) fn exp_primal_interior(s: &[f64]) -> bool {
+    s.len() >= 3
+        && s[1] > 0.0
+        && s[2] > 0.0
+        && (s[1] * (s[2] / s[1]).ln() - s[0]).is_finite()
+        && s[1] * (s[2] / s[1]).ln() - s[0] > 1e-16
+}
+
+/// Interior of the dual exponential cone: \(u<0,w>0,\; -u\exp(v/u-1)<w\).
+pub(crate) fn exp_dual_interior(z: &[f64]) -> bool {
+    if z.len() < 3 || z[2] <= 0.0 || z[0] >= 0.0 {
+        return false;
+    }
+    let l = (-z[2] / z[0]).ln();
+    if !l.is_finite() {
+        return false;
+    }
+    z[1] - z[0] - z[0] * l > 1e-16
+}
+
+/// Dual-barrier Hessian \(\nabla^2 f^\ast(z)\) at a dual-interior point, row-major.
+pub(crate) fn exp_dual_hessian(z: &[f64]) -> Option<[f64; 9]> {
+    if !exp_dual_interior(z) {
+        return None;
+    }
+    let l = (-z[2] / z[0]).ln();
+    let r = -z[0] * l - z[0] + z[1];
+    if r <= 1e-16 || !r.is_finite() {
+        return None;
+    }
+    let z0 = z[0];
+    let z2 = z[2];
+    let h00 = (r * r - z0 * r + l * l * z0 * z0) / (r * z0 * z0 * r);
+    let h01 = -l / (r * r);
+    let h11 = 1.0 / (r * r);
+    let h02 = (z[1] - z0) / (r * r * z2);
+    let h12 = -z0 / (r * r * z2);
+    let h22 = (r * r - z0 * r + z0 * z0) / (r * r * z2 * z2);
+    if ![h00, h01, h11, h02, h12, h22]
+        .iter()
+        .all(|v| v.is_finite())
+    {
+        return None;
+    }
+    Some([h00, h01, h02, h01, h11, h12, h02, h12, h22])
+}
+
+pub(crate) fn exp_unit_point() -> [f64; 3] {
+    // Self-dual unit initialization used by ECOS/Clarabel for EXP.
+    [
+        -1.051_383_945_322_714,
+        0.556_409_619_469_370,
+        1.258_967_884_768_947,
+    ]
+}
+
+pub(crate) fn exp_backtrack(x: &[f64], d: &[f64], primal: bool) -> f64 {
+    let mut a = 1.0_f64;
+    let mut w = [0.0; 3];
+    for _ in 0..48 {
+        w[0] = x[0] + a * d[0];
+        w[1] = x[1] + a * d[1];
+        w[2] = x[2] + a * d[2];
+        let ok = if primal {
+            exp_primal_interior(&w)
+        } else {
+            exp_dual_interior(&w)
+        };
+        if ok {
+            return a;
+        }
+        a *= 0.8;
+        if a < 1e-14 {
+            return 0.0;
+        }
+    }
+    a
+}
+
 fn project_psd_triangle(x: &mut [f64], side: usize) {
     let n = side;
     let mut a = vec![0.0; n * n];
@@ -621,5 +735,16 @@ mod tests {
         let mut x = [-1.0, 2.0];
         project_cone(&Cone::Nonnegative { dim: 2 }, &mut x);
         assert_eq!(x, [0.0, 2.0]);
+    }
+
+    #[test]
+    fn exp_unit_is_interior() {
+        let u = exp_unit_point();
+        assert!(exp_primal_interior(&u));
+        assert!(exp_dual_interior(&u));
+        let h = exp_dual_hessian(&u).unwrap();
+        assert!(h[0] > 0.0);
+        let det2 = h[0] * h[4] - h[1] * h[1];
+        assert!(det2 > 0.0);
     }
 }
