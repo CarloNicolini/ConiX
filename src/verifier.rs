@@ -10,8 +10,13 @@ pub struct Residuals {
     pub res_dual: f64,
     pub res_gap: f64,
     pub res_cone: f64,
+    pub res_comp: f64,
     pub obj_p: f64,
     pub obj_d: f64,
+}
+
+pub fn merit(r: &Residuals) -> f64 {
+    r.res_pri + r.res_dual + r.res_gap + r.res_cone + r.res_comp
 }
 
 pub fn residuals(
@@ -44,18 +49,24 @@ pub fn residuals(
     let obj_p = 0.5 * xtpx + dot(q, x);
     let obj_d = -0.5 * xtpx - dot(b, z);
     let gap = (obj_p - obj_d).abs();
+    let comp = dot(s, z).abs();
     Residuals {
         res_pri: inf_norm(&rp) / (1.0 + inf_norm(b)),
         res_dual: inf_norm(&rd) / (1.0 + inf_norm(q)),
         res_gap: gap / (1.0 + obj_p.abs() + obj_d.abs()),
         res_cone: cones.dist(s).max(cones.dist_dual(z)) / (1.0 + inf_norm(s).max(inf_norm(z))),
+        res_comp: comp / (1.0 + obj_p.abs() + obj_d.abs()),
         obj_p,
         obj_d,
     }
 }
 
 pub fn solved_at(r: &Residuals, eps: f64) -> bool {
-    r.res_pri <= eps && r.res_dual <= eps && r.res_gap <= eps && r.res_cone <= eps
+    r.res_pri <= eps
+        && r.res_dual <= eps
+        && r.res_gap <= eps
+        && r.res_cone <= eps
+        && r.res_comp <= eps
 }
 
 pub fn check_primal_ray(

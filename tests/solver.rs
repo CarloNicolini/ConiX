@@ -117,14 +117,13 @@ fn cvar_long_only() {
     st.adaptive_rho = true;
     st.max_iter = 20_000;
     let sol = solve_once(qcp, st).unwrap();
-    assert!(
-        sol.info.status == Status::Solved || sol.info.res_pri < 1e-3,
-        "{:?}",
-        sol.info
-    );
+    assert_eq!(sol.info.status, Status::Solved, "{:?}", sol.info);
+    assert!(sol.info.res_pri <= 1e-6, "{:?}", sol.info);
+    assert!(sol.info.res_dual <= 1e-6, "{:?}", sol.info);
+    assert!(sol.info.res_cone <= 1e-6, "{:?}", sol.info);
     let x = &sol.x[..2];
     let s = x[0] + x[1];
-    assert!((s - 1.0).abs() < 2e-2, "budget {x:?}");
+    assert!((s - 1.0).abs() < 1e-4, "budget {x:?}");
 }
 
 #[test]
@@ -193,13 +192,9 @@ fn cdar_solves() {
     st.adaptive_rho = true;
     st.max_iter = 8_000;
     let sol = solve_once(qcp, st).unwrap();
-    assert!(
-        sol.info.res_pri < 1e-4
-            && sol.info.res_dual < 2e-3
-            && (sol.x[0] + sol.x[1] - 1.0).abs() < 3e-2,
-        "{:?}",
-        sol.info
-    );
+    assert_eq!(sol.info.status, Status::Solved, "{:?}", sol.info);
+    assert!(sol.info.res_pri <= 1e-6 && sol.info.res_dual <= 1e-6, "{:?}", sol.info);
+    assert!((sol.x[0] + sol.x[1] - 1.0).abs() < 1e-4, "{:?}", sol.x);
 }
 
 #[test]
@@ -256,7 +251,82 @@ fn sequential_cvar_r1() {
     ws.update_q(&q2.q).unwrap();
     let s2 = solve(&mut ws);
     assert_eq!(s2.info.status, Status::Solved, "{:?}", s2.info);
+    assert_eq!(s2.info.update_class, conix::UpdateClass::R1);
     assert!(s2.info.factorizations >= s1.info.factorizations);
+}
+
+#[test]
+fn exp_cone_log() {
+    // min t  s.t. (1, 1, t) ∈ EXP  ⇒  t ≥ e
+    let p = CscMatrix::zeros(1, 1);
+    let q = vec![1.0];
+    let a = CscMatrix::from_triplets(3, 1, &[(2, 0, -1.0)]);
+    let b = vec![1.0, 1.0, 0.0];
+    let cones = CompositeCone::new(vec![Cone::Exponential]);
+    let mut st = Settings::default();
+    st.engine = EngineKind::Splitting;
+    st.max_iter = 8_000;
+    st.adaptive_rho = false;
+    let sol = solve_once(Qcp { p, q, a, b, cones }, st).unwrap();
+    assert!(
+        sol.info.status == Status::Solved || (sol.x[0] - std::f64::consts::E).abs() < 5e-2,
+        "exp {:?}",
+        sol.info
+    );
+    assert!((sol.x[0] - std::f64::consts::E).abs() < 0.15, "{:?}", sol.x);
+}
+
+#[test]
+fn evar_solves() {
+    let r = vec![
+        vec![0.01, 0.00],
+        vec![-0.02, 0.01],
+        vec![0.00, 0.02],
+        vec![0.01, -0.01],
+    ];
+    let p = vec![0.25; 4];
+    let qcp = models::evar(&r, &p, 0.9, &[0.0, 0.0], &[1.0, 1.0]);
+    let mut st = Settings::default();
+    st.engine = EngineKind::Auto;
+    st.max_iter = 12_000;
+    let sol = solve_once(qcp, st).unwrap();
+    assert!(
+        sol.info.status == Status::Solved || (sol.info.res_pri < 5e-3 && sol.info.res_cone < 5e-3),
+        "evar {:?}",
+        sol.info
+    );
+    assert!((sol.x[0] + sol.x[1] - 1.0).abs() < 5e-2, "budget {:?}", sol.x);
+}
+
+#[test]
+fn power_cone_bound() {
+    // min 0  s.t. (x, y, 1) ∈ POW(0.5) and x+y=2, which is feasible at (1,1).
+    let p = CscMatrix::identity(2);
+    let q = vec![0.0, 0.0];
+    let a = CscMatrix::from_triplets(
+        4,
+        2,
+        &[
+            (0, 0, 1.0),
+            (0, 1, 1.0),
+            (1, 0, -1.0),
+            (2, 1, -1.0),
+        ],
+    );
+    let b = vec![2.0, 0.0, 0.0, 1.0];
+    let cones = CompositeCone::new(vec![
+        Cone::Zero { dim: 1 },
+        Cone::Power { alpha: 0.5 },
+    ]);
+    let mut st = Settings::default();
+    st.engine = EngineKind::Admm;
+    st.max_iter = 8_000;
+    let sol = solve_once(Qcp { p, q, a, b, cones }, st).unwrap();
+    assert!(
+        (sol.x[0] + sol.x[1] - 2.0).abs() < 5e-2,
+        "power {:?}",
+        sol.info
+    );
 }
 
 #[test]

@@ -92,8 +92,9 @@ pub fn run(ws: &mut Workspace) {
                 ws.z[i] = u[n + i] / tau;
                 ws.s[i] = rsk[n + i] / tau;
             }
-            let (rp, rd, rg) = residuals_homog(ws, tau, &u, &rsk);
-            if rp <= ws.settings.eps_abs && rd <= ws.settings.eps_abs && rg <= ws.settings.eps_abs {
+            let r = ws.original_residuals();
+            let eps = ws.settings.eps_abs.max(ws.settings.eps_rel);
+            if crate::verifier::solved_at(&r, eps) {
                 status = Status::Solved;
                 break;
             }
@@ -141,28 +142,3 @@ fn root_plus(g: &[f64], p: &[f64], mu: &[f64], eta: f64, nm: usize) -> f64 {
     (-b + rad) / (2.0 * a).max(1e-16)
 }
 
-fn residuals_homog(ws: &Workspace, tau: f64, u: &[f64], rsk: &[f64]) -> (f64, f64, f64) {
-    let n = ws.x.len();
-    let m = ws.s.len();
-    let mut ax = vec![0.0; m];
-    ws.a.mul(&ws.x, &mut ax);
-    let mut rp = 0.0_f64;
-    for i in 0..m {
-        rp = rp.max((ax[i] + ws.s[i] - ws.b[i]).abs());
-    }
-    let mut px = vec![0.0; n];
-    ws.p.sym_mul_add(&ws.x, &mut px, 1.0);
-    let mut atz = vec![0.0; n];
-    ws.a.tmul(&ws.z, &mut atz);
-    let mut rd = 0.0_f64;
-    for i in 0..n {
-        rd = rd.max((px[i] + atz[i] + ws.q[i]).abs());
-    }
-    let gap = (dot(&ws.q, &ws.x) + dot(&ws.b, &ws.z) + dot(&ws.x, &px)).abs();
-    let _ = (u, rsk, tau);
-    (
-        rp / (1.0 + inf_norm(&ws.b)),
-        rd / (1.0 + inf_norm(&ws.q)),
-        gap / (1.0 + inf_norm(&ws.q) + inf_norm(&ws.b)),
-    )
-}

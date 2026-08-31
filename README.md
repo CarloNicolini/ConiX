@@ -20,11 +20,16 @@ State that is persisted is typed: symbolic sparsity, numeric factorization, iter
 
 ## Status
 
-Rust kernel is in tree: sequential workspace, cached quasi-definite LDL, proximal ADMM, homogeneous DR, IPM fallback, cone projections (zero, nonnegative, SOC, exponential, power, genpower, PSD), and finance builders (mean-variance, CVaR, MAD, CDaR, EVaR).
+Rust kernel is in tree: sequential workspace, cached quasi-definite LDL, COSMO-style ADMM with sparse active-set polish, homogeneous DR, IPM fallback, cone projections (zero, nonnegative, SOC, exponential, power, genpower, PSD), and finance builders (mean-variance, CVaR, MAD, CDaR, EVaR).
+
+Every accepted `Solved` status is re-checked in original coordinates (`r_p`, `r_d`, `r_K`, gap, complementarity). R0 updates reuse the numeric KKT factor. Finance slacks are reconstructed from `x` after R0/R1 data changes, not copied blindly.
 
 ```bash
 cargo test
+cargo test --test compare -- --nocapture
 ```
 
-Correctness is checked by an independent residual/ray verifier. Sequence-level speed vs Clarabel/SCS/OSQP is not claimed until those benchmarks exist.
+Sequence-level timings vs Clarabel 0.9 (same QCP form, persistent `update_q` / `update_A`) are in [docs/benchmarks.md](docs/benchmarks.md). OSQP and SCS are not linked here; they are C libraries, not a same-language cone peer of Clarabel.rs.
+
+Remaining work toward the full objective: uniform 1e-6 on every rolling CVaR date, production Anderson, a stronger IPM, OSQP/SCS C harnesses, and a Python backtest API.
 

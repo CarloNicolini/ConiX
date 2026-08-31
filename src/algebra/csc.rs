@@ -187,6 +187,23 @@ impl CscMatrix {
             && self.row_idx == other.row_idx
     }
 
+    /// Extract a subset of rows, preserving column order and explicit zeros.
+    pub fn select_rows(&self, rows: &[usize]) -> Self {
+        let mut inv = vec![None; self.m];
+        for (k, &r) in rows.iter().enumerate() {
+            inv[r] = Some(k);
+        }
+        let mut trips = Vec::new();
+        for j in 0..self.n {
+            for p in self.col_ptr[j]..self.col_ptr[j + 1] {
+                if let Some(k) = inv[self.row_idx[p]] {
+                    trips.push((k, j, self.x[p]));
+                }
+            }
+        }
+        Self::from_triplets_keep_zeros(rows.len(), self.n, &trips)
+    }
+
     pub fn to_dense(&self) -> Vec<Vec<f64>> {
         let mut d = vec![vec![0.0; self.n]; self.m];
         for j in 0..self.n {

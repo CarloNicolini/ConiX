@@ -55,6 +55,7 @@ pub struct Workspace {
     pub last_update: UpdateClass,
     pub info: SolveInfo,
     pub last_engine: EngineKind,
+    pub has_solution: bool,
     // splitting embedding
     pub v_embed: Vec<f64>,
     pub g_embed: Vec<f64>,
@@ -98,6 +99,7 @@ impl Workspace {
             last_update: UpdateClass::Setup,
             info: SolveInfo::default(),
             last_engine: EngineKind::Admm,
+            has_solution: false,
             v_embed: vec![0.0; nm + 1],
             g_embed: vec![0.0; nm],
             h_embed: vec![0.0; nm],
@@ -110,7 +112,7 @@ impl Workspace {
         }
         self.orig.q.copy_from_slice(q);
         self.reapply_scale_vectors();
-        self.last_update = UpdateClass::R0;
+        bump_update(&mut self.last_update, UpdateClass::R0);
         Ok(())
     }
 
@@ -120,7 +122,8 @@ impl Workspace {
         }
         self.orig.b.copy_from_slice(b);
         self.reapply_scale_vectors();
-        self.last_update = UpdateClass::R0;
+        self.reconstruct_slacks();
+        bump_update(&mut self.last_update, UpdateClass::R0);
         Ok(())
     }
 
@@ -134,7 +137,7 @@ impl Workspace {
         }
         self.orig.p = p.clone();
         self.reassemble_r1()?;
-        self.last_update = UpdateClass::R1;
+        bump_update(&mut self.last_update, UpdateClass::R1);
         Ok(())
     }
 
@@ -144,7 +147,7 @@ impl Workspace {
         }
         self.orig.a = a.clone();
         self.reassemble_r1()?;
-        self.last_update = UpdateClass::R1;
+        bump_update(&mut self.last_update, UpdateClass::R1);
         Ok(())
     }
 
@@ -204,11 +207,62 @@ impl Workspace {
         self.q = q;
         self.a = a;
         self.b = b;
+        self.rho = default_rho(&self.cones, self.settings.rho);
         self.kkt
             .update_pa(&self.p, &self.a, self.settings.sigma, &self.rho)?;
         self.factorizations += 1;
+        self.z.fill(0.0);
+        self.reconstruct_slacks();
         Ok(())
     }
+
+    /// Rebuild cone slacks from the current primal: `s = Π_K(b - Ax)`.
+    /// Finance auxiliaries (CVaR/MAD/CDaR z, peaks) are not copied; they are
+    /// implied by this projection after an R0/R1 data change.
+    pub fn reconstruct_slacks(&mut self) {
+        let m = self.s.len();
+        let mut ax = vec![0.0; m];
+        self.a.mul(&self.x, &mut ax);
+        for i in 0..m {
+            self.s[i] = self.b[i] - ax[i];
+        }
+        self.cones.project(&mut self.s);
+        let n = self.x.len();
+        self.w[..n].copy_from_slice(&self.x);
+        self.w_prev[..n].copy_from_slice(&self.x);
+        for i in 0..m {
+            let wi = self.s[i] - self.z[i] / self.rho[i];
+            self.w[n + i] = wi;
+            self.w_prev[n + i] = wi;
+        }
+    }
+
+    /// Independent residuals in the caller's original coordinates.
+    pub fn original_residuals(&self) -> crate::verifier::Residuals {
+        let mut x = self.x.clone();
+        let mut s = self.s.clone();
+        let mut z = self.z.clone();
+        crate::scale::unscale_solution(&self.eq, &mut x, &mut s, &mut z);
+        crate::verifier::residuals(
+            &self.orig.p,
+            &self.orig.q,
+            &self.orig.a,
+            &self.orig.b,
+            &self.orig.cones,
+            &x,
+            &s,
+            &z,
+        )
+    }
+}
+
+fn bump_update(cur: &mut UpdateClass, incoming: UpdateClass) {
+    *cur = match (*cur, incoming) {
+        (UpdateClass::R2, _) | (_, UpdateClass::R2) => UpdateClass::R2,
+        (UpdateClass::R1, _) | (_, UpdateClass::R1) => UpdateClass::R1,
+        (UpdateClass::R0, _) | (_, UpdateClass::R0) => UpdateClass::R0,
+        _ => UpdateClass::Setup,
+    };
 }
 
 fn default_rho(cones: &CompositeCone, rho0: f64) -> Vec<f64> {
@@ -223,7 +277,7 @@ fn default_rho(cones: &CompositeCone, rho0: f64) -> Vec<f64> {
     rho
 }
 
-pub fn solve(ws: &mut Workspace) -> Solution {
+fn run_engines(ws: &mut Workspace) {
     let engine = ws.settings.engine;
     ws.last_engine = engine;
     match engine {
@@ -231,11 +285,7 @@ pub fn solve(ws: &mut Workspace) -> Solution {
         EngineKind::Splitting => crate::engines::splitting::run(ws),
         EngineKind::Admm => crate::engines::admm::run(ws),
         EngineKind::Auto => {
-            if ws.cones.is_polyhedral() {
-                crate::engines::admm::run(ws);
-            } else {
-                crate::engines::splitting::run(ws);
-            }
+            crate::engines::admm::run(ws);
             if ws.info.status == crate::status::Status::MaxIters {
                 let bak_x = ws.x.clone();
                 let bak_s = ws.s.clone();
@@ -248,9 +298,7 @@ pub fn solve(ws: &mut Workspace) -> Solution {
                 let r_new = crate::verifier::residuals(
                     &ws.p, &ws.q, &ws.a, &ws.b, &ws.cones, &ws.x, &ws.s, &ws.z,
                 );
-                let m_old = r_old.res_pri + r_old.res_dual + r_old.res_gap + r_old.res_cone;
-                let m_new = r_new.res_pri + r_new.res_dual + r_new.res_gap + r_new.res_cone;
-                if m_new > m_old {
+                if crate::verifier::merit(&r_new) > crate::verifier::merit(&r_old) {
                     ws.x = bak_x;
                     ws.s = bak_s;
                     ws.z = bak_z;
@@ -259,6 +307,9 @@ pub fn solve(ws: &mut Workspace) -> Solution {
             }
         }
     }
+}
+
+fn finalize(ws: &mut Workspace) -> Solution {
     let mut x = ws.x.clone();
     let mut s = ws.s.clone();
     let mut z = ws.z.clone();
@@ -277,20 +328,89 @@ pub fn solve(ws: &mut Workspace) -> Solution {
     ws.info.res_dual = r.res_dual;
     ws.info.res_gap = r.res_gap;
     ws.info.res_cone = r.res_cone;
+    ws.info.res_comp = r.res_comp;
     ws.info.obj_primal = r.obj_p;
     ws.info.obj_dual = r.obj_d;
     ws.info.factorizations = ws.factorizations;
     ws.info.update_class = ws.last_update;
-    if crate::verifier::solved_at(&r, ws.settings.eps_abs.max(ws.settings.eps_rel))
-        && ws.info.status != crate::status::Status::PrimalInfeasible
-        && ws.info.status != crate::status::Status::DualInfeasible
-    {
-        ws.info.status = crate::status::Status::Solved;
+    let eps = ws.settings.eps_abs.max(ws.settings.eps_rel);
+    match ws.info.status {
+        crate::status::Status::PrimalInfeasible => {
+            if !crate::verifier::check_primal_ray(
+                &ws.orig.a,
+                &ws.orig.b,
+                &ws.orig.cones,
+                &z,
+                ws.settings.eps_infeas,
+            ) {
+                ws.info.status = crate::status::Status::MaxIters;
+            }
+        }
+        crate::status::Status::DualInfeasible => {
+            if !crate::verifier::check_dual_ray(
+                &ws.orig.p,
+                &ws.orig.q,
+                &ws.orig.a,
+                &ws.orig.cones,
+                &x,
+                ws.settings.eps_infeas,
+            ) {
+                ws.info.status = crate::status::Status::MaxIters;
+            }
+        }
+        _ => {
+            if crate::verifier::solved_at(&r, eps) {
+                ws.info.status = crate::status::Status::Solved;
+            } else if ws.info.status == crate::status::Status::Solved {
+                ws.info.status = crate::status::Status::MaxIters;
+            }
+        }
     }
+    ws.has_solution = ws.info.status == crate::status::Status::Solved;
     Solution {
         x,
         s,
         z,
         info: ws.info.clone(),
     }
+}
+
+pub fn solve(ws: &mut Workspace) -> Solution {
+    let class = ws.last_update;
+    run_engines(ws);
+    let sol = finalize(ws);
+    if class == UpdateClass::R1
+        && sol.info.status != crate::status::Status::Solved
+        && (sol.info.res_pri > 1e-4 || sol.info.res_dual > 1e-4)
+    {
+        let bak_x = ws.x.clone();
+        let bak_s = ws.s.clone();
+        let bak_z = ws.z.clone();
+        let bak_info = sol.info.clone();
+        ws.x.fill(0.0);
+        ws.s.fill(0.0);
+        ws.z.fill(0.0);
+        ws.w.fill(0.0);
+        ws.w_prev.fill(0.0);
+        ws.has_solution = false;
+        run_engines(ws);
+        let sol2 = finalize(ws);
+        let m1 = bak_info.res_pri + bak_info.res_dual + bak_info.res_cone;
+        let m2 = sol2.info.res_pri + sol2.info.res_dual + sol2.info.res_cone;
+        if m2 > m1 {
+            ws.x = bak_x;
+            ws.s = bak_s;
+            ws.z = bak_z;
+            ws.info = bak_info;
+            ws.has_solution = ws.info.status == crate::status::Status::Solved;
+            let mut out = finalize(ws);
+            out.info.update_class = UpdateClass::R1;
+            ws.last_update = UpdateClass::Setup;
+            return out;
+        }
+        ws.last_update = UpdateClass::Setup;
+        return sol2;
+    }
+    ws.last_update = UpdateClass::Setup;
+    sol
 }

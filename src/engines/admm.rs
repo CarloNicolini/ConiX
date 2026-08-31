@@ -1,6 +1,11 @@
 //! COSMO-style two-block ADMM with cached quasi-definite factors.
+//!
+//! COSMO stores the primal `x` as a view of `w_prev`, so residuals are
+//! evaluated on the same `w` that was just projected onto `K`. We copy that
+//! convention: after `w ← w`, `s = Π_K(w_s)`, termination uses `x = w_prev[1:n]`.
 
 use crate::algebra::{axpy, copy_from, dot, inf_norm};
+use crate::kkt::KktSystem;
 use crate::status::{Status, UpdateClass};
 use crate::workspace::Workspace;
 
@@ -12,22 +17,29 @@ pub fn run(ws: &mut Workspace) {
     let mut ls = vec![0.0; n + m];
     let mut sol = vec![0.0; n + m];
     let mut s_tl = vec![0.0; m];
-    let mut dx = vec![0.0; n];
-    let mut dy = vec![0.0; m];
+    let mut ax = vec![0.0; m];
+    let mut px = vec![0.0; n];
+    let mut atz = vec![0.0; n];
 
-    // w = [x; s - z/ρ]  because z = ρ(s - w_s)
+    // w = [x; s - z/ρ]  because z = ρ(s - w_s) = -μ_COSMO ∈ K*.
     ws.w[..n].copy_from_slice(&ws.x);
     for i in 0..m {
         ws.w[n + i] = ws.s[i] - ws.z[i] / ws.rho[i];
     }
 
-    // initialization step so iterates match standard ADMM
-    x_update(ws, &mut ls, &mut sol, &mut s_tl, sigma, n, m);
-    w_update(ws, &sol[..n], &s_tl, alpha, n, m);
+    // COSMO does one affine step so the loop's first projection matches ADMM.
+    // Skip it only when re-solving unchanged data from an accepted solution.
+    let reuse = ws.has_solution && matches!(ws.last_update, UpdateClass::Setup);
+    if !reuse {
+        x_update(ws, &mut ls, &mut sol, &mut s_tl, sigma, n, m);
+        w_update(ws, &sol[..n], &s_tl, alpha, n, m);
+    }
 
     let mut status = Status::Unsolved;
     let mut iter = 0usize;
     let mut aa = Anderson::new(ws.settings.anderson_memory, n + m);
+    let eps = ws.settings.eps_abs.max(ws.settings.eps_rel);
+    let mut n_rho = 0usize;
 
     while iter < ws.settings.max_iter {
         iter += 1;
@@ -36,16 +48,19 @@ pub fn run(ws: &mut Workspace) {
             aa.capture_in(&ws.w);
         }
 
-        // z-update: s = Π_K(w[n:])
+        // s = Π_K(w[n:]); x for residuals is w_prev[1:n] == current w[1:n] here.
         ws.s.copy_from_slice(&ws.w[n..]);
         ws.cones.project(&mut ws.s);
 
         if ws.settings.adaptive_rho
+            && n_rho < ws.settings.adaptive_rho_max_adaptions
             && iter % ws.settings.adaptive_rho_interval.max(1) == 0
             && iter > 1
         {
-            recover_mu(ws, n);
-            if adapt_rho(ws) {
+            recover_z(ws, n);
+            ws.x.copy_from_slice(&ws.w_prev[..n]);
+            if adapt_rho(ws, &mut ax, &mut px, &mut atz, eps) {
+                n_rho += 1;
                 ws.kkt.update_rho(&ws.rho).ok();
                 ws.factorizations += 1;
                 aa.reset();
@@ -62,59 +77,20 @@ pub fn run(ws: &mut Workspace) {
             aa.maybe_replace(&mut ws.w);
         }
 
-        if iter % ws.settings.check_termination == 0 || iter == 1 {
-            recover_mu(ws, n);
-            ws.x.copy_from_slice(&ws.w[..n]);
-            let (rp, rd) = scaled_residuals(ws);
-            if rp <= ws.settings.eps_abs + ws.settings.eps_rel
-                && rd <= ws.settings.eps_abs + ws.settings.eps_rel
-            {
+        if iter % ws.settings.check_termination == 0 || iter == 1 || iter == ws.settings.max_iter {
+            recover_z(ws, n);
+            // COSMO: x is a view of w_prev.
+            ws.x.copy_from_slice(&ws.w_prev[..n]);
+            let r = ws.original_residuals();
+            if crate::verifier::solved_at(&r, eps) {
                 status = Status::Solved;
-                break;
-            }
-        }
-
-        if iter % ws.settings.check_infeasibility == 0 {
-            recover_mu(ws, n);
-            for i in 0..n {
-                dx[i] = ws.w[i] - ws.w_prev[i];
-            }
-            for i in 0..m {
-                dy[i] = ws.z[i] - dy[i]; // filled below
-            }
-            // δy from μ difference: store previous μ in dy at last check
-            // Use current z vs previous recovered from w_prev
-            let mut z_prev = vec![0.0; m];
-            for i in 0..m {
-                z_prev[i] = ws.rho[i] * (ws.s[i] - ws.w_prev[n + i]);
-                dy[i] = ws.z[i] - z_prev[i];
-            }
-            if crate::verifier::check_primal_ray(
-                &ws.a,
-                &ws.b,
-                &ws.cones,
-                &dy,
-                ws.settings.eps_infeas,
-            ) {
-                status = Status::PrimalInfeasible;
-                break;
-            }
-            if crate::verifier::check_dual_ray(
-                &ws.p,
-                &ws.q,
-                &ws.a,
-                &ws.cones,
-                &dx,
-                ws.settings.eps_infeas,
-            ) {
-                status = Status::DualInfeasible;
                 break;
             }
         }
     }
 
-    recover_mu(ws, n);
-    ws.x.copy_from_slice(&ws.w[..n]);
+    recover_z(ws, n);
+    ws.x.copy_from_slice(&ws.w_prev[..n]);
     if status == Status::Unsolved && iter >= ws.settings.max_iter {
         status = Status::MaxIters;
     }
@@ -123,11 +99,9 @@ pub fn run(ws: &mut Workspace) {
         && status != Status::PrimalInfeasible
         && status != Status::DualInfeasible
     {
-        polish(ws);
-        let (rp, rd) = scaled_residuals(ws);
-        if rp <= ws.settings.eps_abs + ws.settings.eps_rel
-            && rd <= ws.settings.eps_abs + ws.settings.eps_rel
-        {
+        sparse_polish(ws);
+        let r = ws.original_residuals();
+        if crate::verifier::solved_at(&r, eps) {
             status = Status::Solved;
         }
     }
@@ -171,29 +145,30 @@ fn w_update(ws: &mut Workspace, x_tl: &[f64], s_tl: &[f64], alpha: f64, n: usize
     }
 }
 
-fn recover_mu(ws: &mut Workspace, n: usize) {
+fn recover_z(ws: &mut Workspace, n: usize) {
     let m = ws.s.len();
-    // Moreau: w_s - s ∈ -K*, so z = ρ (s - w_s) ∈ K*.
+    // Moreau: μ_COSMO = ρ (w_s - s) ∈ -K*, so z = -μ = ρ (s - w_s) ∈ K*.
     for i in 0..m {
         ws.z[i] = ws.rho[i] * (ws.s[i] - ws.w_prev[n + i]);
     }
 }
 
-fn scaled_residuals(ws: &Workspace) -> (f64, f64) {
-    let n = ws.x.len();
-    let m = ws.s.len();
-    let mut ax = vec![0.0; m];
-    ws.a.mul(&ws.x, &mut ax);
+fn scaled_residuals(
+    ws: &Workspace,
+    ax: &mut [f64],
+    px: &mut [f64],
+    atz: &mut [f64],
+) -> (f64, f64) {
+    ws.a.mul(&ws.x, ax);
     let mut rp = 0.0_f64;
-    for i in 0..m {
+    for i in 0..ax.len() {
         rp = rp.max((ax[i] + ws.s[i] - ws.b[i]).abs());
     }
-    let mut px = vec![0.0; n];
-    ws.p.sym_mul_add(&ws.x, &mut px, 1.0);
-    let mut atz = vec![0.0; n];
-    ws.a.tmul(&ws.z, &mut atz);
+    px.fill(0.0);
+    ws.p.sym_mul_add(&ws.x, px, 1.0);
+    ws.a.tmul(&ws.z, atz);
     let mut rd = 0.0_f64;
-    for i in 0..n {
+    for i in 0..px.len() {
         rd = rd.max((px[i] + atz[i] + ws.q[i]).abs());
     }
     let rp = rp / (1.0 + inf_norm(&ws.b));
@@ -201,8 +176,17 @@ fn scaled_residuals(ws: &Workspace) -> (f64, f64) {
     (rp, rd)
 }
 
-fn adapt_rho(ws: &mut Workspace) -> bool {
-    let (rp, rd) = scaled_residuals(ws);
+fn adapt_rho(
+    ws: &mut Workspace,
+    ax: &mut [f64],
+    px: &mut [f64],
+    atz: &mut [f64],
+    eps: f64,
+) -> bool {
+    let (rp, rd) = scaled_residuals(ws, ax, px, atz);
+    if rp < 10.0 * eps && rd < 10.0 * eps {
+        return false;
+    }
     if rp < 1e-18 && rd < 1e-18 {
         return false;
     }
@@ -220,144 +204,183 @@ fn adapt_rho(ws: &mut Workspace) -> bool {
     false
 }
 
-fn polish(ws: &mut Workspace) {
-    // Identify nearly-active nonnegative rows and freeze them as equalities.
-    // For zero cones they are already equalities.
+/// OSQP-style equality QP on an identified active set, using a throwaway
+/// reduced KKT so the sequential factor cache is not dirtied.
+fn sparse_polish(ws: &mut Workspace) {
     let n = ws.x.len();
-    let mut eq_rows: Vec<usize> = Vec::new();
-    for (cone, &off) in ws.cones.cones.iter().zip(&ws.cones.offsets) {
-        match cone {
-            crate::cones::Cone::Zero { dim } => {
+    let m = ws.s.len();
+    let eps = ws.settings.eps_abs.max(ws.settings.eps_rel);
+    let nn_rows: Vec<usize> = {
+        let mut v = Vec::new();
+        for (cone, &off) in ws.cones.cones.iter().zip(&ws.cones.offsets) {
+            if let crate::cones::Cone::Nonnegative { dim } = cone {
                 for k in 0..*dim {
-                    eq_rows.push(off + k);
+                    v.push(off + k);
                 }
             }
-            crate::cones::Cone::Nonnegative { dim } => {
-                for k in 0..*dim {
-                    let i = off + k;
-                    if ws.s[i].abs() < 1e-4 && ws.z[i].abs() > 1e-8 {
-                        eq_rows.push(i);
+        }
+        v
+    };
+    for &thresh in &[1e-4_f64, 1e-3, 5e-3] {
+        let mut eq_rows: Vec<usize> = Vec::new();
+        let mut is_eq = vec![false; m];
+        for (cone, &off) in ws.cones.cones.iter().zip(&ws.cones.offsets) {
+            match cone {
+                crate::cones::Cone::Zero { dim } => {
+                    for k in 0..*dim {
+                        is_eq[off + k] = true;
+                        eq_rows.push(off + k);
                     }
                 }
+                crate::cones::Cone::Nonnegative { dim } => {
+                    for k in 0..*dim {
+                        let i = off + k;
+                        if ws.s[i].abs() <= thresh || ws.z[i] > 10.0 * thresh {
+                            is_eq[i] = true;
+                            eq_rows.push(i);
+                        }
+                    }
+                }
+                _ => {}
             }
-            _ => {}
         }
-    }
-    if eq_rows.is_empty() {
-        return;
-    }
-    // Dense equality QP on the identified set, accepted only if residuals drop.
-    let ne = eq_rows.len();
-    let dim = n + ne;
-    let mut k = vec![0.0; dim * dim];
-    let mut rhs = vec![0.0; dim];
-    // P block
-    let pd = ws.p.to_dense();
-    for i in 0..n {
-        for j in 0..n {
-            let v = if i < pd.len() && j < pd[i].len() {
-                pd[i][j]
-            } else {
-                0.0
+        if eq_rows.is_empty() {
+            continue;
+        }
+        let mut accepted = false;
+        for _ in 0..6 {
+            let a_eq = ws.a.select_rows(&eq_rows);
+            let mut b_eq = vec![0.0; eq_rows.len()];
+            for (t, &row) in eq_rows.iter().enumerate() {
+                b_eq[t] = ws.b[row];
+            }
+            let Some(sol) = solve_eq_qp(&ws.p, &a_eq, &ws.q, &b_eq) else {
+                break;
             };
-            k[i * dim + j] += v;
-            if i != j {
-                // dense from upper-only P: fill from CSC via sym
+            let xnew = sol[..n].to_vec();
+            let mut ax = vec![0.0; m];
+            ws.a.mul(&xnew, &mut ax);
+            let mut sraw = vec![0.0; m];
+            for i in 0..m {
+                sraw[i] = ws.b[i] - ax[i];
             }
-        }
-        rhs[i] = -ws.q[i];
-        k[i * dim + i] += 1e-10;
-    }
-    // Use CSC symmetric multiply to fill P properly
-    k[..dim * dim].fill(0.0);
-    for j in 0..n {
-        for p in ws.p.col_ptr[j]..ws.p.col_ptr[j + 1] {
-            let i = ws.p.row_idx[p];
-            k[i * dim + j] += ws.p.x[p];
-            if i != j {
-                k[j * dim + i] += ws.p.x[p];
+            let mut added = false;
+            for &i in &nn_rows {
+                if !is_eq[i] && sraw[i] < -1e-12 {
+                    is_eq[i] = true;
+                    eq_rows.push(i);
+                    added = true;
+                }
             }
+            if added {
+                continue;
+            }
+            let mut snew = sraw;
+            ws.cones.project(&mut snew);
+            let mut znew = vec![0.0; m];
+            for (t, &row) in eq_rows.iter().enumerate() {
+                znew[row] = sol[n + t];
+            }
+            for &i in &nn_rows {
+                if znew[i] < 0.0 {
+                    znew[i] = 0.0;
+                }
+            }
+            let r_old = ws.original_residuals();
+            let r_new = {
+                let mut x = xnew.clone();
+                let mut s = snew.clone();
+                let mut z = znew.clone();
+                crate::scale::unscale_solution(&ws.eq, &mut x, &mut s, &mut z);
+                crate::verifier::residuals(
+                    &ws.orig.p,
+                    &ws.orig.q,
+                    &ws.orig.a,
+                    &ws.orig.b,
+                    &ws.orig.cones,
+                    &x,
+                    &s,
+                    &z,
+                )
+            };
+            if r_new.res_pri + r_new.res_dual + r_new.res_cone
+                <= r_old.res_pri + r_old.res_dual + r_old.res_cone
+            {
+                ws.x = xnew;
+                ws.s = snew;
+                ws.z = znew;
+                ws.w[..n].copy_from_slice(&ws.x);
+                ws.w_prev[..n].copy_from_slice(&ws.x);
+                for i in 0..m {
+                    let wi = ws.s[i] - ws.z[i] / ws.rho[i];
+                    ws.w[n + i] = wi;
+                    ws.w_prev[n + i] = wi;
+                }
+                accepted = true;
+                if crate::verifier::solved_at(&r_new, eps) {
+                    return;
+                }
+            }
+            break;
         }
-        k[j * dim + j] += 1e-10;
-        rhs[j] = -ws.q[j];
-    }
-    let ad = ws.a.to_dense();
-    for (t, &row) in eq_rows.iter().enumerate() {
-        for j in 0..n {
-            let v = ad[row][j];
-            k[n + t] += 0.0;
-            k[(n + t) * dim + j] = v;
-            k[j * dim + (n + t)] = v;
-        }
-        rhs[n + t] = ws.b[row];
-    }
-    if let Some(sol) = solve_dense(&k, &rhs, dim) {
-        let xnew = sol[..n].to_vec();
-        let mut snew = vec![0.0; ws.s.len()];
-        let mut ax = vec![0.0; ws.s.len()];
-        ws.a.mul(&xnew, &mut ax);
-        for i in 0..ws.s.len() {
-            snew[i] = ws.b[i] - ax[i];
-        }
-        ws.cones.project(&mut snew);
-        let mut znew = ws.z.clone();
-        for (t, &row) in eq_rows.iter().enumerate() {
-            znew[row] = sol[n + t];
-        }
-        let r_old =
-            crate::verifier::residuals(&ws.p, &ws.q, &ws.a, &ws.b, &ws.cones, &ws.x, &ws.s, &ws.z);
-        let r_new =
-            crate::verifier::residuals(&ws.p, &ws.q, &ws.a, &ws.b, &ws.cones, &xnew, &snew, &znew);
-        if r_new.res_pri + r_new.res_dual + r_new.res_gap
-            < r_old.res_pri + r_old.res_dual + r_old.res_gap
-        {
-            ws.x = xnew;
-            ws.s = snew;
-            ws.z = znew;
+        if accepted && crate::verifier::solved_at(&ws.original_residuals(), eps) {
+            return;
         }
     }
 }
 
-fn solve_dense(k: &[f64], rhs: &[f64], n: usize) -> Option<Vec<f64>> {
-    let mut a = k.to_vec();
-    let mut b = rhs.to_vec();
-    for col in 0..n {
-        let mut piv = col;
-        let mut best = a[col * n + col].abs();
-        for i in col + 1..n {
-            let v = a[i * n + col].abs();
-            if v > best {
-                best = v;
-                piv = i;
+fn solve_eq_qp(
+    p: &crate::algebra::CscMatrix,
+    a_eq: &crate::algebra::CscMatrix,
+    q: &[f64],
+    b_eq: &[f64],
+) -> Option<Vec<f64>> {
+    let n = p.n;
+    let ne = a_eq.m;
+    let dim = n + ne;
+    if dim == 0 {
+        return None;
+    }
+    if dim <= 128 {
+        let mut k = vec![0.0; dim * dim];
+        let mut rhs = vec![0.0; dim];
+        for j in 0..n {
+            for idx in p.col_ptr[j]..p.col_ptr[j + 1] {
+                let i = p.row_idx[idx];
+                k[i * dim + j] += p.x[idx];
+                if i != j {
+                    k[j * dim + i] += p.x[idx];
+                }
+            }
+            k[j * dim + j] += 1e-8;
+            rhs[j] = -q[j];
+        }
+        for c in 0..n {
+            for idx in a_eq.col_ptr[c]..a_eq.col_ptr[c + 1] {
+                let r = a_eq.row_idx[idx];
+                let v = a_eq.x[idx];
+                k[(n + r) * dim + c] = v;
+                k[c * dim + (n + r)] = v;
             }
         }
-        if best < 1e-16 {
-            return None;
+        for t in 0..ne {
+            k[(n + t) * dim + (n + t)] = -1e-8;
+            rhs[n + t] = b_eq[t];
         }
-        if piv != col {
-            for j in 0..n {
-                a.swap(col * n + j, piv * n + j);
-            }
-            b.swap(col, piv);
-        }
-        let diag = a[col * n + col];
-        for i in col + 1..n {
-            let f = a[i * n + col] / diag;
-            b[i] -= f * b[col];
-            for j in col..n {
-                a[i * n + j] -= f * a[col * n + j];
-            }
+        if let Some(sol) = solve_dense(&k, &rhs, dim) {
+            return Some(sol);
         }
     }
-    let mut x = vec![0.0; n];
-    for i in (0..n).rev() {
-        let mut s = b[i];
-        for j in i + 1..n {
-            s -= a[i * n + j] * x[j];
-        }
-        x[i] = s / a[i * n + i];
+    let rho_eq = vec![1e6; ne];
+    let mut kkt = KktSystem::analyze(p, a_eq, 1e-6, &rho_eq).ok()?;
+    let mut rhs = vec![0.0; dim];
+    for i in 0..n {
+        rhs[i] = -q[i];
     }
-    Some(x)
+    rhs[n..].copy_from_slice(b_eq);
+    let mut sol = vec![0.0; dim];
+    kkt.solve(&rhs, &mut sol, 8);
+    Some(sol)
 }
 
 struct Anderson {
@@ -405,7 +428,6 @@ impl Anderson {
             return;
         }
         let mk = self.f_hist.len() - 1;
-        // Type-I least squares on ΔF α ≈ f_k
         let mut gram = vec![0.0; mk * mk];
         let mut rhs = vec![0.0; mk];
         let fk = &self.f_hist[mk];
@@ -435,7 +457,6 @@ impl Anderson {
                         .collect::<Vec<_>>()
                 });
             }
-            // merit: ||cand - x_prev|| vs ||x - x_prev||
             let prev = &self.x_hist[k - 1];
             let mut n1 = 0.0;
             let mut n2 = 0.0;
@@ -448,4 +469,51 @@ impl Anderson {
             }
         }
     }
+}
+
+fn solve_dense(k: &[f64], rhs: &[f64], n: usize) -> Option<Vec<f64>> {
+    let mut a = k.to_vec();
+    let mut b = rhs.to_vec();
+    for col in 0..n {
+        let mut piv = col;
+        let mut best = a[col * n + col].abs();
+        for i in col + 1..n {
+            let v = a[i * n + col].abs();
+            if v > best {
+                best = v;
+                piv = i;
+            }
+        }
+        if best < 1e-14 {
+            a[col * n + col] = if a[col * n + col] >= 0.0 {
+                1e-12
+            } else {
+                -1e-12
+            };
+            piv = col;
+        }
+        if piv != col {
+            for j in 0..n {
+                a.swap(col * n + j, piv * n + j);
+            }
+            b.swap(col, piv);
+        }
+        let diag = a[col * n + col];
+        for i in col + 1..n {
+            let f = a[i * n + col] / diag;
+            b[i] -= f * b[col];
+            for j in col..n {
+                a[i * n + j] -= f * a[col * n + j];
+            }
+        }
+    }
+    let mut x = vec![0.0; n];
+    for i in (0..n).rev() {
+        let mut s = b[i];
+        for j in i + 1..n {
+            s -= a[i * n + j] * x[j];
+        }
+        x[i] = s / a[i * n + i];
+    }
+    Some(x)
 }
