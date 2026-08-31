@@ -39,14 +39,19 @@ pub fn run(ws: &mut Workspace) {
     let mut u = vec![0.0; l];
     let mut ut = vec![0.0; l];
     let mut rsk = vec![0.0; l];
-    let mut aa = crate::engines::anderson::Anderson::new(ws.settings.anderson_memory, l);
+    let aa_mem = if l < 32 {
+        0
+    } else {
+        ws.settings.anderson_memory
+    };
+    let mut aa = crate::engines::anderson::Anderson::new(aa_mem, l);
     let mut status = Status::Unsolved;
     let mut iter = 0usize;
     let alpha = ws.settings.alpha.min(1.8).max(1.0);
 
     while iter < ws.settings.max_iter {
         iter += 1;
-        if ws.settings.anderson_memory > 0 {
+        if aa_mem > 0 {
             aa.capture_in(&v);
         }
         // linear resolvent
@@ -86,7 +91,7 @@ pub fn run(ws: &mut Workspace) {
         for vi in v.iter_mut() {
             *vi *= target / vn;
         }
-        if ws.settings.anderson_memory > 0 {
+        if aa_mem > 0 {
             aa.maybe_replace(&mut v);
         }
 
@@ -148,4 +153,3 @@ fn root_plus(g: &[f64], p: &[f64], mu: &[f64], eta: f64, nm: usize) -> f64 {
     let rad = (b * b - 4.0 * a * c).max(0.0).sqrt();
     (-b + rad) / (2.0 * a).max(1e-16)
 }
-

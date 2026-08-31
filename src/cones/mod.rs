@@ -73,6 +73,25 @@ impl Cone {
                 | Cone::PsdTriangle { .. }
         )
     }
+
+    /// Lower-right IPM block is a diagonal (Zero/NN) rather than a dense triangle.
+    /// GenPower is stored as diagonal plus a later sparse expansion; without that
+    /// expansion we still treat it as diagonal (Clarabel `get_Hs` returns `D` only).
+    pub fn hs_is_diagonal(&self) -> bool {
+        matches!(
+            self,
+            Cone::Zero { .. } | Cone::Nonnegative { .. } | Cone::GenPower { .. }
+        )
+    }
+
+    pub fn hs_packed_len(&self) -> usize {
+        let d = self.dim();
+        if self.hs_is_diagonal() {
+            d
+        } else {
+            d * (d + 1) / 2
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -581,10 +600,7 @@ pub(crate) fn exp_dual_hessian(z: &[f64]) -> Option<[f64; 9]> {
     let h02 = (z[1] - z0) / (r * r * z2);
     let h12 = -z0 / (r * r * z2);
     let h22 = (r * r - z0 * r + z0 * z0) / (r * r * z2 * z2);
-    if ![h00, h01, h11, h02, h12, h22]
-        .iter()
-        .all(|v| v.is_finite())
-    {
+    if ![h00, h01, h11, h02, h12, h22].iter().all(|v| v.is_finite()) {
         return None;
     }
     Some([h00, h01, h02, h01, h11, h12, h02, h12, h22])

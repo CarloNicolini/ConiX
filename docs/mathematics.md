@@ -208,19 +208,21 @@ Infeasibility uses Banjac rays from iterate differences, then the independent ve
 
 ### 4.3 Engine I — homogeneous predictor-corrector IPM (fallback)
 
-Use Clarabel’s quadratic homogeneous embedding. Linearization reduces every Newton step to one factorization of
+Use Clarabel’s quadratic homogeneous embedding. Linearization reduces every Newton step to one factorization of the sparse cone-block system
 
 \[
-\begin{bmatrix} P & A^\top \\ A & -H \end{bmatrix}
+\begin{bmatrix} P & A^\top \\ A & -H_s \end{bmatrix}
 \]
 
-and three triangular solves (affine predictor, centering/corrector, combined). Symmetric cones use Nesterov–Todd scaling. On **polyhedral** cones the NT Hessian is diagonal, \(H=\mathrm{diag}(s./z)\), which is the ADMM KKT of §3.1 with \(\rho_i=z_i/s_i\). ConiX therefore runs the polyhedral IPM by rewriting only those diagonals on the cached AMD-ordered factor; \(\sigma\) and \(\rho\) are restored afterwards so a later R0 ADMM step still matches the sequential contract. Nonsymmetric cones use Clarabel’s dual-barrier Hessian \(\nabla^2 f^\ast(z)\) (and the derived primal-dual \(H_s\) when the step is large enough), unit initialization, and the linearized centrality
+and a 2×2 reduction for \(\Delta\tau\) (constant solve \(K[x_2;z_2]=[-q;b]\), then \(\Delta x=x_1+\Delta\tau x_2\)). \(H_s\) is block-diagonal: diagonal \(s./z\) on Zero/NN, packed upper triangle on SOC (Nesterov–Todd), exponential, and 3D power. AMD order and the symbolic factor persist across Newton steps and across sequential **R1** updates that keep the \((P,A)\) pattern. Only the numeric \(H_s\) values and the LDL numbers change.
+
+Symmetric cones use Nesterov–Todd scaling. On **polyhedral** cones the NT Hessian is diagonal, \(H=\mathrm{diag}(s./z)\). Nonsymmetric cones use Clarabel’s dual-barrier Hessian \(\nabla^2 f^\ast(z)\) (and the derived primal-dual \(H_s\) when the step is large enough), unit initialization, and the linearized centrality
 
 \[
 \Delta s + H_s\Delta z = -\bigl(s + \sigma\mu\nabla f^\ast(z)\bigr),\qquad \sigma=(1-\alpha_{\mathrm{aff}})^3.
 \]
 
-NT scaling is **not** used on exponential or power cones. The dense IPM path is a primal-dual Newton method on \((x,s,z)\); the Andersen–Ye \((\tau,\kappa)\) embedding is the homogeneous DR engine, not this Newton loop. Infeasible exponential programs are therefore certified by Engine S (or rejected by the independent ray checker), not by an IPM Farkas embedding.
+The homogeneous residuals are \(r_x=-Px-A^\top z-q\tau\), \(r_z=Ax+s-b\tau\), \(\mu=(s^\top z+\tau\kappa)/(\nu+1)\). A solved iterate is \((x,s,z)/\tau\). When \(\kappa/\tau\) is large the same path yields a Farkas certificate (accepted only if the independent ray checker of §6 agrees). NT scaling is **not** used on exponential or power cones.
 
 **Hot start, not a copied optimum.** Keep two points from a previous IPM solve: the last strictly interior iterate at barrier parameter \(\mu_{\mathrm{anchor}}>0\), and the accepted solution. For a new \(\theta_t\),
 

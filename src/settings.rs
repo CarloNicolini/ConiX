@@ -23,7 +23,7 @@ pub struct Settings {
     /// ADMM iteration cap used by `EngineKind::Auto` on polyhedral problems
     /// before the NT-IPM fallback. Non-polyhedral Auto uses `max_iter`.
     pub auto_admm_max_iter: usize,
-    /// Newton steps for the polyhedral (and dense) IPM engines.
+    /// Newton steps for the homogeneous sparse-KKT IPM.
     pub ipm_max_iter: usize,
 }
 

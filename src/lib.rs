@@ -4,6 +4,7 @@ pub mod algebra;
 pub mod capi;
 pub mod cones;
 pub mod engines;
+pub mod ipm_kkt;
 pub mod kkt;
 pub mod models;
 pub mod scale;

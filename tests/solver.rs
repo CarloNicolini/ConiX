@@ -390,7 +390,11 @@ fn sequential_evar_r1() {
     let s2 = solve(&mut ws);
     assert_eq!(s2.info.status, Status::Solved, "{:?}", s2.info);
     assert_eq!(s2.info.update_class, conix::UpdateClass::R1);
-    assert!(s2.info.res_pri <= 1e-6 && s2.info.res_dual <= 1e-6, "{:?}", s2.info);
+    assert!(
+        s2.info.res_pri <= 1e-6 && s2.info.res_dual <= 1e-6,
+        "{:?}",
+        s2.info
+    );
 }
 
 #[test]
@@ -454,4 +458,38 @@ fn verifier_independent() {
     .unwrap();
     let r = conix::verifier::residuals(&p, &q, &a, &b, &cones, &sol.x, &sol.s, &sol.z);
     assert!(r.res_cone < 1e-6);
+}
+
+#[test]
+fn ipm_primal_infeasible_lp() {
+    // x >= 1 and x <= 0.
+    let p = CscMatrix::zeros(1, 1);
+    let q = vec![0.0];
+    let a = CscMatrix::from_triplets(2, 1, &[(0, 0, -1.0), (1, 0, 1.0)]);
+    let b = vec![-1.0, 0.0];
+    let cones = CompositeCone::new(vec![Cone::Nonnegative { dim: 2 }]);
+    let mut st = Settings::default();
+    st.engine = EngineKind::Ipm;
+    st.ipm_max_iter = 80;
+    let sol = solve_once(Qcp { p, q, a, b, cones }, st).unwrap();
+    assert_eq!(sol.info.status, Status::PrimalInfeasible, "{:?}", sol.info);
+}
+
+#[test]
+fn ipm_kkt_cone_blocks_not_dense() {
+    let p = CscMatrix::zeros(1, 1);
+    let a = CscMatrix::from_triplets(9, 1, &[(0, 0, 1.0), (3, 0, -1.0), (6, 0, 0.5)]);
+    let cones = CompositeCone::new(vec![
+        Cone::Nonnegative { dim: 3 },
+        Cone::Exponential,
+        Cone::Exponential,
+    ]);
+    let k = conix::ipm_kkt::IpmKkt::analyze(&p, &a, &cones).unwrap();
+    let dense_hs = 9 * 10 / 2;
+    assert!(
+        k.k_nnz() < dense_hs,
+        "nnz={} should beat a dense m×m Hs triangle ({dense_hs})",
+        k.k_nnz()
+    );
+    assert_eq!(k.packed_len(), 3 + 6 + 6);
 }

@@ -37,14 +37,19 @@ pub fn run(ws: &mut Workspace) {
 
     let mut status = Status::Unsolved;
     let mut iter = 0usize;
-    let mut aa = crate::engines::anderson::Anderson::new(ws.settings.anderson_memory, n + m);
+    let aa_mem = if n + m < 32 {
+        0
+    } else {
+        ws.settings.anderson_memory
+    };
+    let mut aa = crate::engines::anderson::Anderson::new(aa_mem, n + m);
     let eps = ws.settings.eps_abs.max(ws.settings.eps_rel);
     let mut n_rho = 0usize;
 
     while iter < ws.settings.max_iter {
         iter += 1;
         copy_from(&mut ws.w_prev, &ws.w);
-        if ws.settings.anderson_memory > 0 {
+        if aa_mem > 0 {
             aa.capture_in(&ws.w);
         }
 
@@ -73,7 +78,7 @@ pub fn run(ws: &mut Workspace) {
         x_update(ws, &mut ls, &mut sol, &mut s_tl, sigma, n, m);
         w_update(ws, &sol[..n], &s_tl, alpha, n, m);
 
-        if ws.settings.anderson_memory > 0 {
+        if aa_mem > 0 {
             aa.maybe_replace(&mut ws.w);
         }
 

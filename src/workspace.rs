@@ -60,6 +60,8 @@ pub struct Workspace {
     pub v_embed: Vec<f64>,
     pub g_embed: Vec<f64>,
     pub h_embed: Vec<f64>,
+    /// Sparse cone-block IPM KKT (AMD + symbolic reused on R1).
+    pub ipm_kkt: Option<crate::ipm_kkt::IpmKkt>,
 }
 
 impl Workspace {
@@ -103,6 +105,7 @@ impl Workspace {
             v_embed: vec![0.0; nm + 1],
             g_embed: vec![0.0; nm],
             h_embed: vec![0.0; nm],
+            ipm_kkt: None,
         })
     }
 
@@ -211,6 +214,13 @@ impl Workspace {
         self.kkt
             .update_pa(&self.p, &self.a, self.settings.sigma, &self.rho)?;
         self.factorizations += 1;
+        if let Some(ipm) = self.ipm_kkt.as_mut() {
+            if ipm.update_pa(&self.p, &self.a).is_err() {
+                self.ipm_kkt = None;
+            } else {
+                self.factorizations += 1;
+            }
+        }
         self.z.fill(0.0);
         self.reconstruct_slacks();
         Ok(())
