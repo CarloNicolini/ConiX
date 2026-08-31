@@ -748,6 +748,219 @@ fn sequence_r1_cvar_backtest_vs_clarabel() {
 }
 
 #[test]
+fn sequence_r1_mad_vs_clarabel() {
+    let n = 8usize;
+    let t = 20usize;
+    let dates = 8usize;
+    let l = vec![0.0; n];
+    let u = vec![1.0; n];
+    let p = vec![1.0 / t as f64; t];
+    let r0 = returns(t, n, 13);
+    let q0 = models::mad(&r0, &p, &l, &u);
+
+    let mut st = Settings::default();
+    st.engine = EngineKind::Auto;
+    let mut ws = setup(
+        Qcp {
+            p: q0.p.clone(),
+            q: q0.q.clone(),
+            a: q0.a.clone(),
+            b: q0.b.clone(),
+            cones: q0.cones.clone(),
+        },
+        st,
+    )
+    .unwrap();
+
+    let P = to_clarabel(&q0.p.upper_triangle());
+    let A = to_clarabel(&q0.a);
+    let cones = cones_clarabel(&q0);
+    let mut clar = DefaultSolver::new(&P, &q0.q, &A, &q0.b, &cones, clarabel_settings());
+
+    let mut t_conix = 0.0_f64;
+    let mut t_clar = 0.0_f64;
+    let mut seed = 31u64;
+    let t0 = Instant::now();
+    let s0 = solve(&mut ws);
+    t_conix += t0.elapsed().as_secs_f64();
+    assert_eq!(s0.info.status, Status::Solved, "mad0 {:?}", s0.info);
+    clar.solve();
+    assert_eq!(clar.solution.status, SolverStatus::Solved);
+
+    for d in 1..dates {
+        let r = returns(t, n, 300 + d as u64 + seed);
+        seed = seed.wrapping_add(1);
+        let q1 = models::mad(&r, &p, &l, &u);
+        ws.update_a(&q1.a).unwrap();
+        ws.update_b(&q1.b).unwrap();
+        ws.update_q(&q1.q).unwrap();
+        let t1 = Instant::now();
+        let s = solve(&mut ws);
+        t_conix += t1.elapsed().as_secs_f64();
+        assert_eq!(s.info.status, Status::Solved, "mad date{d} {:?}", s.info);
+        assert!(s.info.res_pri <= 1e-6 && s.info.res_dual <= 1e-6 && s.info.res_comp <= 1e-6);
+
+        let t2 = Instant::now();
+        clar.update_A(&to_clarabel(&q1.a)).unwrap();
+        clar.update_b(&q1.b).unwrap();
+        clar.update_q(&q1.q).unwrap();
+        clar.solve();
+        t_clar += t2.elapsed().as_secs_f64();
+        assert_eq!(clar.solution.status, SolverStatus::Solved);
+        assert!(
+            (s.info.obj_primal - clar.solution.obj_val).abs()
+                < 1e-2_f64.max(5e-3 * clar.solution.obj_val.abs()),
+            "date{d} obj ours={} clarabel={}",
+            s.info.obj_primal,
+            clar.solution.obj_val
+        );
+    }
+    println!("R1 MAD n={n} T={t} dates={dates}: ConiX={t_conix:.4}s  Clarabel-update={t_clar:.4}s");
+}
+
+#[test]
+fn sequence_r1_cdar_vs_clarabel() {
+    let n = 6usize;
+    let t = 16usize;
+    let dates = 8usize;
+    let l = vec![0.0; n];
+    let u = vec![1.0; n];
+    let r0 = returns(t, n, 17);
+    let q0 = models::cdar(&r0, 0.8, &l, &u);
+
+    let mut st = Settings::default();
+    st.engine = EngineKind::Auto;
+    let mut ws = setup(
+        Qcp {
+            p: q0.p.clone(),
+            q: q0.q.clone(),
+            a: q0.a.clone(),
+            b: q0.b.clone(),
+            cones: q0.cones.clone(),
+        },
+        st,
+    )
+    .unwrap();
+
+    let P = to_clarabel(&q0.p.upper_triangle());
+    let A = to_clarabel(&q0.a);
+    let cones = cones_clarabel(&q0);
+    let mut clar = DefaultSolver::new(&P, &q0.q, &A, &q0.b, &cones, clarabel_settings());
+
+    let mut t_conix = 0.0_f64;
+    let mut t_clar = 0.0_f64;
+    let mut seed = 41u64;
+    let t0 = Instant::now();
+    let s0 = solve(&mut ws);
+    t_conix += t0.elapsed().as_secs_f64();
+    assert_eq!(s0.info.status, Status::Solved, "cdar0 {:?}", s0.info);
+    clar.solve();
+    assert_eq!(clar.solution.status, SolverStatus::Solved);
+
+    for d in 1..dates {
+        let r = returns(t, n, 400 + d as u64 + seed);
+        seed = seed.wrapping_add(1);
+        let q1 = models::cdar(&r, 0.8, &l, &u);
+        ws.update_a(&q1.a).unwrap();
+        ws.update_b(&q1.b).unwrap();
+        ws.update_q(&q1.q).unwrap();
+        let t1 = Instant::now();
+        let s = solve(&mut ws);
+        t_conix += t1.elapsed().as_secs_f64();
+        assert_eq!(s.info.status, Status::Solved, "cdar date{d} {:?}", s.info);
+        assert!(s.info.res_pri <= 1e-6 && s.info.res_dual <= 1e-6 && s.info.res_comp <= 1e-6);
+
+        let t2 = Instant::now();
+        clar.update_A(&to_clarabel(&q1.a)).unwrap();
+        clar.update_b(&q1.b).unwrap();
+        clar.update_q(&q1.q).unwrap();
+        clar.solve();
+        t_clar += t2.elapsed().as_secs_f64();
+        assert_eq!(clar.solution.status, SolverStatus::Solved);
+        assert!(
+            (s.info.obj_primal - clar.solution.obj_val).abs()
+                < 1e-2_f64.max(5e-3 * clar.solution.obj_val.abs()),
+            "date{d} obj ours={} clarabel={}",
+            s.info.obj_primal,
+            clar.solution.obj_val
+        );
+    }
+    println!("R1 CDaR n={n} T={t} dates={dates}: ConiX={t_conix:.4}s  Clarabel-update={t_clar:.4}s");
+}
+
+#[test]
+fn sequence_r1_cvar_wide_vs_clarabel() {
+    let n = 25usize;
+    let t = 48usize;
+    let dates = 8usize;
+    let l = vec![0.0; n];
+    let u = vec![1.0; n];
+    let r0 = returns(t, n, 5);
+    let q0 = models::cvar(&r0, 0.9, &l, &u);
+
+    let mut st = Settings::default();
+    st.engine = EngineKind::Auto;
+    let mut ws = setup(
+        Qcp {
+            p: q0.p.clone(),
+            q: q0.q.clone(),
+            a: q0.a.clone(),
+            b: q0.b.clone(),
+            cones: q0.cones.clone(),
+        },
+        st,
+    )
+    .unwrap();
+
+    let P = to_clarabel(&q0.p.upper_triangle());
+    let A = to_clarabel(&q0.a);
+    let cones = cones_clarabel(&q0);
+    let mut clar = DefaultSolver::new(&P, &q0.q, &A, &q0.b, &cones, clarabel_settings());
+
+    let mut t_conix = 0.0_f64;
+    let mut t_clar = 0.0_f64;
+    let mut seed = 51u64;
+    let t0 = Instant::now();
+    let s0 = solve(&mut ws);
+    t_conix += t0.elapsed().as_secs_f64();
+    assert_eq!(s0.info.status, Status::Solved, "wide0 {:?}", s0.info);
+    clar.solve();
+    assert_eq!(clar.solution.status, SolverStatus::Solved);
+
+    for d in 1..dates {
+        let r = returns(t, n, 500 + d as u64 + seed);
+        seed = seed.wrapping_add(1);
+        let q1 = models::cvar(&r, 0.9, &l, &u);
+        ws.update_a(&q1.a).unwrap();
+        ws.update_b(&q1.b).unwrap();
+        ws.update_q(&q1.q).unwrap();
+        let t1 = Instant::now();
+        let s = solve(&mut ws);
+        t_conix += t1.elapsed().as_secs_f64();
+        assert_eq!(s.info.status, Status::Solved, "wide date{d} {:?}", s.info);
+        assert!(s.info.res_pri <= 1e-6 && s.info.res_dual <= 1e-6 && s.info.res_comp <= 1e-6);
+
+        let t2 = Instant::now();
+        clar.update_A(&to_clarabel(&q1.a)).unwrap();
+        clar.update_b(&q1.b).unwrap();
+        clar.update_q(&q1.q).unwrap();
+        clar.solve();
+        t_clar += t2.elapsed().as_secs_f64();
+        assert_eq!(clar.solution.status, SolverStatus::Solved);
+        assert!(
+            (s.info.obj_primal - clar.solution.obj_val).abs()
+                < 1e-2_f64.max(5e-3 * clar.solution.obj_val.abs()),
+            "date{d} obj ours={} clarabel={}",
+            s.info.obj_primal,
+            clar.solution.obj_val
+        );
+    }
+    println!(
+        "R1 CVaR wide n={n} T={t} dates={dates}: ConiX={t_conix:.4}s  Clarabel-update={t_clar:.4}s"
+    );
+}
+
+#[test]
 fn sequence_vs_scs_python() {
     let script = format!("{}/scripts/scs_sequence.py", env!("CARGO_MANIFEST_DIR"));
     let out = std::process::Command::new("python3")

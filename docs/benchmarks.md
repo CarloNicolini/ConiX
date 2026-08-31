@@ -15,28 +15,31 @@ OSQP/SCS numbers use each solver's own termination; ConiX `Solved` additionally 
 - Polyhedral **setup / R1**: homogeneous NT-IPM on a sparse diagonal-\(H_s\) KKT (AMD reused across Newton steps), then ADMM only if IPM does not certify.
 - Exponential / power / SOC / PSD: homogeneous barrier IPM first (Andersen–Ye \((\tau,\kappa)\), sparse cone-block \(H_s\), Nesterov–Todd on SOC/PSD, Clarabel dual / primal-dual scaling on exp/power, unit initialization, \(\sigma=(1-\alpha_{\mathrm{aff}})^3\)), ADMM only if the independent checker prefers it.
 
+IPM sequential solves reuse the AMD order and symbolic factor. They **unit-initialize**
+\((s,z)\) rather than copying the previous complementary solution: that point is not a
+valid barrier start (copying it increased Newton work on EVaR/CVaR R1).
+
 ## R0 Markowitz (long-only QP, \(n=8\), \(P=I\) fixed, \(\mu\) changes, 20 dates)
 
 | Profile | ConiX | Clarabel update | Clarabel cold | OSQP update | SCS update |
 |---|---|---|---|---|---|
 | debug | 0.0073 s | 0.0108 s | 0.0137 s | 0.0005 s | 0.0004 s |
-| release | 0.0004 s | 0.0004 s | 0.0007 s | 0.0001 s | 0.0005 s |
+| release | 0.0003 s | 0.0004 s | 0.0006 s | 0.0001 s | 0.0004 s |
 
-ConiX uses **2 numeric factors** over 20 dates. Skipping Anderson on this tiny map recovers the
-pre-Anderson 0.0004 s release figure and matches Clarabel-update; OSQP remains the QP specialist.
-Objectives match Clarabel/OSQP to \(10^{-3}\) relative; budget residuals are independently below \(10^{-4}\).
+ConiX uses **2 numeric factors** over 20 dates. Skipping Anderson on this tiny map keeps
+Clarabel-class time; OSQP remains the QP specialist. Objectives match Clarabel/OSQP to
+\(10^{-3}\) relative; budget residuals are independently below \(10^{-4}\).
 
 ## R1 CVaR (long-only LP, \(n=5\), \(T=12\), scenario matrix values change, 10 dates)
 
 | Profile | ConiX (10/10 at \(10^{-6}\)) | Clarabel update | OSQP update | SCS cold |
 |---|---|---|---|---|
 | debug | 0.015 s | 0.019 s | 0.383 s (0/10 certified) | 0.055 s (5/10 `SOLVED`) |
-| release | 0.0007 s | 0.0007 s | 0.073 s (0/10 certified) | 0.057 s (5/10 `SOLVED`) |
+| release | 0.0007 s | 0.0007 s | 0.070 s (0/10 certified) | 0.054 s (5/10 `SOLVED`) |
 
-This is the hypothesis that used to fail: ADMM-only ConiX spent ~6 s in debug and missed
-\(10^{-6}\) on some dates. Homogeneous NT-IPM on the cached cone-block pattern hits checked
-\(10^{-6}\) on every date and matches Clarabel's release wall-clock. OSQP/SCS ADMM do not
-reliably certify this LP at \(10^{-6}\).
+Homogeneous NT-IPM on the cached cone-block pattern hits checked \(10^{-6}\) on every date
+and matches Clarabel's release wall-clock. OSQP/SCS ADMM do not reliably certify this LP
+at \(10^{-6}\).
 
 ## R1 CVaR backtest slice (\(n=15\), \(T=36\), \(\beta=0.9\), 12 dates)
 
@@ -45,8 +48,34 @@ independently `Solved` at \(10^{-6}\) and matches the Clarabel objective.
 
 | Profile | ConiX | Clarabel update |
 |---|---|---|
-| debug | 0.108 s | 0.121 s |
-| release | 0.0041 s | 0.0047 s |
+| debug | 0.107 s | 0.119 s |
+| release | 0.0045 s | 0.0047 s |
+
+## R1 CVaR wide (\(n=25\), \(T=48\), \(\beta=0.9\), 8 dates)
+
+| Profile | ConiX | Clarabel update |
+|---|---|---|
+| debug | 0.175 s | 0.139 s |
+| release | 0.0059 s | 0.0059 s |
+
+Release wall-clock matches Clarabel; every date is independently `Solved` at \(10^{-6}\).
+
+## R1 MAD (\(n=8\), \(T=20\), 8 dates)
+
+| Profile | ConiX | Clarabel update |
+|---|---|---|
+| debug | 0.033 s | 0.031 s |
+| release | 0.0013 s | 0.0011 s |
+
+## R1 CDaR (\(n=6\), \(T=16\), \(\beta=0.8\), 8 dates)
+
+Affine-path peaks make a longer polyhedral chain than CVaR. Every date is independently
+`Solved` at \(10^{-6}\) and the objective matches Clarabel. Clarabel still wins this slice.
+
+| Profile | ConiX | Clarabel update |
+|---|---|---|
+| debug | 0.037 s | 0.036 s |
+| release | 0.0030 s | 0.0013 s |
 
 ## R1 EVaR (exponential cones, \(n=4\), \(T=10\), \(p=1/T\), \(\beta=0.8\), 6 dates)
 
@@ -65,19 +94,24 @@ ADMM/DR still solve that program, but collapse toward the \(t\to 0\) ray on EVaR
 A primal-infeasible LP is certified by the same homogeneous path and independently checked
 as a Farkas ray (`ipm_primal_infeasible_lp`).
 
+## PSD Nesterov–Todd (no in-process Clarabel SDP; crate built without the `sdp` feature)
+
+`skron(I)=I`, \(H_s z=s\) on random PD pairs, unit point \(\mathrm{svec}(I)\).
+IPM solves a strictly feasible 2×2 SDP (`psd_ipm_interior`, \(t^\star=2\)) and a
+Schur-complement SDP (`psd_ipm_schur`, \((x,t)=(1,1)\)) at checked residuals.
+An R0 \(q\)-update (`sequential_psd_r0`) stays `Solved`.
+
 ## What this does and does not prove
 
-- Proves: R0 factor reuse; uniform checked \(10^{-6}\) on rolling CVaR and rolling EVaR;
+- Proves: R0 factor reuse; uniform checked \(10^{-6}\) on rolling CVaR, MAD, CDaR, and EVaR;
   homogeneous IPM with independently checked infeasibility certificates; sparse cone-block
-  \(H_s\) so EVaR sequence time is Clarabel-class; polyhedral finance LPs match or beat
-  Clarabel-update and beat OSQP/SCS at checked \(10^{-6}\); original-coordinate residuals
+  \(H_s\) so EVaR sequence time is Clarabel-class; CVaR backtest slices match Clarabel
+  release wall-clock and beat OSQP/SCS at checked \(10^{-6}\); original-coordinate residuals
   are the status authority; the Python sequential API (`python/conix`) drives the same
-  workspace (CVaR R1, EVaR IPM); PSD Nesterov–Todd \(H_s=\mathrm{skron}(G)\) (unit
-  \(\mathrm{svec}(I)\), interior eigenvalue steps) on a strictly feasible 2×2 SDP and a
-  Schur-complement SDP, including an R0 \(q\)-update.
-- Does not prove: dominance over OSQP on small bound QPs (OSQP still wins R0 Markowitz).
-  Generalized power uses Clarabel's dual Hessian as a dense triangle. CVaR/MAD/EVaR/CDaR
-  do not require PSD; the cone is present for Clarabel-class coverage and related SDP models.
+  workspace (CVaR R1, EVaR IPM); production PSD Nesterov–Todd \(H_s=\mathrm{skron}(G)\).
+- Does not prove: dominance over OSQP on small bound QPs (OSQP still wins R0 Markowitz);
+  matching Clarabel on every CDaR/EVaR slice (Clarabel remains faster there). Generalized
+  power uses Clarabel's dual Hessian as a dense triangle.
 
 Reproduce:
 

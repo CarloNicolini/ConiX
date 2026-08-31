@@ -224,7 +224,7 @@ Symmetric cones use Nesterov–Todd scaling. On **polyhedral** cones the NT Hess
 
 The homogeneous residuals are \(r_x=-Px-A^\top z-q\tau\), \(r_z=Ax+s-b\tau\), \(\mu=(s^\top z+\tau\kappa)/(\nu+1)\). A solved iterate is \((x,s,z)/\tau\). When \(\kappa/\tau\) is large the same path yields a Farkas certificate (accepted only if the independent ray checker of §6 agrees). NT scaling is **not** used on exponential or power cones.
 
-**Hot start, not a copied optimum.** Keep two points from a previous IPM solve: the last strictly interior iterate at barrier parameter \(\mu_{\mathrm{anchor}}>0\), and the accepted solution. For a new \(\theta_t\),
+**Hot start, not a copied optimum.** Keep two points from a previous IPM solve: the last strictly interior iterate at barrier parameter \(\mu_{\mathrm{anchor}}>0\), and the accepted solution. Copying the complementary \((x^\star,s^\star,z^\star)\) into the next Newton loop is not a warm start: the Hessian is ill-conditioned there and sequence time on EVaR/CVaR R1 got worse. The implementation therefore unit-initializes IPM iterates and reuses only AMD/symbolic (and numeric \(P,A\) pattern) state. For a new \(\theta_t\),
 
 1. optionally apply a KKT sensitivity predictor if the previous active face looks stable;
 2. take a convex combination with a default centered point (Skajaa–Andersen–Ye);
